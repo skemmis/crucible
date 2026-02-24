@@ -3,11 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Crucible — ALife Sandbox</title>
+  <title>Crucible 3D — ALife Sandbox</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
-    canvas { display: block; }
+
+    /* Three.js appends its canvas as the first child of #app */
+    #app { width: 100vw; height: 100vh; }
+    #app canvas { display: block; width: 100% !important; height: 100% !important; }
 
     #hud {
       position: fixed;
@@ -44,7 +47,8 @@
   </style>
 </head>
 <body>
-  <canvas id="canvas"></canvas>
+  <!-- Three.js renderer appends its canvas here -->
+  <div id="app"></div>
 
   <div id="hud">
     <div class="panel" id="sim-stats">
@@ -57,7 +61,7 @@
   </div>
 
   <div id="controls">
-    [Space] Pause &nbsp;|&nbsp; [Scroll] Zoom &nbsp;|&nbsp; [Drag] Pan &nbsp;|&nbsp; [Click] Select Agent &nbsp;|&nbsp; [&lt;&gt;] Speed &nbsp;|&nbsp; [Esc] Deselect
+    [Space] Pause &nbsp;|&nbsp; [Scroll] Zoom &nbsp;|&nbsp; [Drag] Orbit &nbsp;|&nbsp; [Click] Select Agent &nbsp;|&nbsp; [&lt;&gt;] Speed &nbsp;|&nbsp; [R] Reset Camera &nbsp;|&nbsp; [Esc] Deselect
   </div>
 
   <script type="module" src="/src/main.ts"></script>

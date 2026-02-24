@@ -1,18 +1,18 @@
 import { PhysicsNode } from '../physics/PhysicsNode';
 import { Spring } from '../physics/Spring';
+import { Vec3 } from '../physics/Vec3';
 import { Genome, SENSOR_COUNT } from './Genome';
-import { Vec2 } from '../physics/Vec2';
 
 let nextId = 0;
 
 export interface EnergyZone {
   x: number;
-  y: number;
+  y: number;  // world Y (typically 0 for ground-level zones)
+  z: number;
   radius: number;
   energy: number;
 }
 
-// Palette of hues — child agents inherit parent hue with slight drift
 function hueFromGeneration(baseHue: number): number {
   return (baseHue + (Math.random() - 0.5) * 30 + 360) % 360;
 }
@@ -24,7 +24,7 @@ export class Agent {
   muscles: Spring[];
 
   energy: number = 120;
-  age: number = 0;        // seconds
+  age: number = 0;
   phase: number;
   dead: boolean = false;
 
@@ -32,15 +32,15 @@ export class Agent {
   readonly parentId: number | null;
   readonly hue: number;
 
-  // Tracking for phylogeny / stats
   readonly birthTime: number;
   totalDistanceTravelled: number = 0;
-  private _lastCenterX: number = 0;
+  private _lastCenterXZ: { x: number; z: number } = { x: 0, z: 0 };
 
   constructor(
     readonly genome: Genome,
     spawnX: number,
-    spawnY: number,
+    spawnY: number,  // height above ground for spawn (usually 0)
+    spawnZ: number,
     generation: number = 0,
     parentId: number | null = null,
     parentHue: number = Math.random() * 360,
@@ -52,27 +52,38 @@ export class Agent {
     this.phase = Math.random() * Math.PI * 2;
     this.birthTime = performance.now();
 
-    // ── Develop body from genome ─────────────────────────────────────────────
-    const { nodes, springs } = this._develop(spawnX, spawnY);
+    const { nodes, springs } = this._develop(spawnX, spawnY, spawnZ);
     this.nodes = nodes;
     this.springs = springs;
     this.muscles = springs.filter(s => s.isActuated);
-    this._lastCenterX = this.centerPos.x;
+    const c = this.centerPos;
+    this._lastCenterXZ = { x: c.x, z: c.z };
   }
 
-  // ── Development ─────────────────────────────────────────────────────────────
+  // ── Development ──────────────────────────────────────────────────────────────
 
-  private _develop(spawnX: number, spawnY: number): { nodes: PhysicsNode[], springs: Spring[] } {
+  private _develop(
+    spawnX: number,
+    spawnY: number,
+    spawnZ: number,
+  ): { nodes: PhysicsNode[]; springs: Spring[] } {
     const g = this.genome;
 
-    // Create nodes with relative offsets
+    // Place nodes using genome offsets (Y-up: dy is height above ground)
     const physNodes = g.nodes.map(n =>
-      new PhysicsNode(spawnX + n.dx, spawnY + n.dy, n.mass, n.radius),
+      new PhysicsNode(
+        spawnX + n.dx,
+        spawnY + n.dy,
+        spawnZ + n.dz,
+        n.mass,
+        n.radius,
+      ),
     );
 
-    // Normalise: shift all nodes so lowest point sits exactly at spawnY
-    const lowestY = Math.max(...physNodes.map(n => n.pos.y + n.radius));
-    const shift = spawnY - lowestY;
+    // Normalise: shift all nodes so the lowest point sits exactly at radius
+    // (just touching the ground plane at Y=0)
+    const lowestY = Math.min(...physNodes.map(n => n.pos.y - n.radius));
+    const shift = -lowestY; // push up so lowest point = 0
     for (const n of physNodes) {
       n.pos.y += shift;
       n.prevPos.y += shift;
@@ -86,19 +97,22 @@ export class Agent {
       const nb = physNodes[sg.b];
       const natural = na.pos.sub(nb.pos).length();
       const rest = natural * sg.restLengthFactor;
-      physSprings.push(new Spring(na, nb, sg.stiffness, sg.damping, rest, sg.isActuated, sg.contractionRatio));
+      physSprings.push(
+        new Spring(na, nb, sg.stiffness, sg.damping, rest, sg.isActuated, sg.contractionRatio),
+      );
     }
 
     return { nodes: physNodes, springs: physSprings };
   }
 
-  // ── Queries ─────────────────────────────────────────────────────────────────
+  // ── Queries ──────────────────────────────────────────────────────────────────
 
-  get centerPos(): Vec2 {
-    if (this.nodes.length === 0) return new Vec2(0, 0);
-    let sx = 0, sy = 0;
-    for (const n of this.nodes) { sx += n.pos.x; sy += n.pos.y; }
-    return new Vec2(sx / this.nodes.length, sy / this.nodes.length);
+  get centerPos(): Vec3 {
+    if (this.nodes.length === 0) return new Vec3(0, 0, 0);
+    let sx = 0, sy = 0, sz = 0;
+    for (const n of this.nodes) { sx += n.pos.x; sy += n.pos.y; sz += n.pos.z; }
+    const inv = 1 / this.nodes.length;
+    return new Vec3(sx * inv, sy * inv, sz * inv);
   }
 
   get boundingRadius(): number {
@@ -111,45 +125,53 @@ export class Agent {
     return maxR;
   }
 
-  // ── Sensing ─────────────────────────────────────────────────────────────────
+  // ── Sensing ──────────────────────────────────────────────────────────────────
 
   private _sense(zones: EnergyZone[]): number[] {
     const c = this.centerPos;
 
-    // Nearest energy zone direction
-    let nearestDx = 0, nearestDy = 0, nearestDist = 2000;
+    // Nearest energy zone direction (XZ plane distance matters most)
+    let nearestDx = 0, nearestDy = 0, nearestDz = 0, nearestDist = 3000;
     for (const z of zones) {
       const dx = z.x - c.x;
-      const dy = z.y - c.y;
-      const d = Math.sqrt(dx * dx + dy * dy);
+      const dy = (z.y ?? 0) - c.y;
+      const dz = z.z - c.z;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (d < nearestDist) {
         nearestDist = d;
         nearestDx = dx;
         nearestDy = dy;
+        nearestDz = dz;
       }
     }
     const dirScale = 1 / (nearestDist + 1);
 
-    // Own horizontal velocity (normalised)
+    // Own average X-velocity
     let velX = 0;
     for (const n of this.nodes) velX += n.vel.x;
     velX /= this.nodes.length;
 
     return [
-      Math.min(1, this.energy / 250),            // 0: hunger [0,1]
-      Math.tanh(nearestDx * dirScale * 5),         // 1: food left/right
-      Math.tanh(nearestDy * dirScale * 5),         // 2: food up/down
-      Math.tanh(velX * 10),                        // 3: own velocity
-      Math.sin(this.phase),                        // 4: oscillator sin
-      Math.cos(this.phase),                        // 5: oscillator cos
+      Math.min(1, this.energy / 250),               // 0: energy [0,1]
+      Math.tanh(nearestDx * dirScale * 5),           // 1: food X
+      Math.tanh(nearestDy * dirScale * 5),           // 2: food Y
+      Math.tanh(nearestDz * dirScale * 5),           // 3: food Z
+      Math.tanh(velX * 10),                          // 4: own vel X
+      Math.sin(this.phase),                          // 5: oscillator sin
+      Math.cos(this.phase),                          // 6: oscillator cos
     ];
   }
 
-  // ── Update ──────────────────────────────────────────────────────────────────
+  // ── Update ───────────────────────────────────────────────────────────────────
 
-  update(dt: number, zones: EnergyZone[], groundY: number, worldWidth: number): void {
+  update(
+    dt: number,
+    zones: EnergyZone[],
+    worldWidth: number,
+    worldDepth: number,
+  ): void {
     this.age += dt;
-    this.phase += dt * (2.5 + Math.sin(this.phase * 0.3) * 0.5); // slightly irregular oscillator
+    this.phase += dt * (2.5 + Math.sin(this.phase * 0.3) * 0.5);
 
     // Brain → muscle activations
     const inputs = this._sense(zones);
@@ -158,34 +180,35 @@ export class Agent {
       this.muscles[i].activation = outputs[i % outputs.length];
     }
 
-    // Spring forces (including muscle energy cost)
+    // Spring forces + energy cost
     let energyCost = 0;
     for (const s of this.springs) {
       s.applyForces(cost => { energyCost += cost; });
     }
 
-    // Gravity
-    const G = 600; // pixels/s²
+    // Gravity (Three.js Y-up: gravity pulls in -Y)
+    const G = 600;
     for (const n of this.nodes) {
-      n.acc.y += G; // Verlet: acc will be multiplied by dt² in integrate
+      n.acc.y -= G; // subtract because +Y is up, gravity is downward
     }
 
     // Integrate + constrain
     for (const n of this.nodes) {
       n.integrate(dt);
-      n.constrainToGround(groundY, 0.35, 0.15);
-      n.constrainToWidth(0, worldWidth);
+      n.constrainToGround(0.35, 0.15);
+      n.constrainToWorldBounds(0, worldWidth, 0, worldDepth);
     }
 
     // Energy accounting
     this.energy -= energyCost;
-    // Existence cost scales with body size: bigger bodies burn more
     this.energy -= (0.6 + this.nodes.length * 0.15) * dt;
 
-    // Track movement
-    const cx = this.centerPos.x;
-    this.totalDistanceTravelled += Math.abs(cx - this._lastCenterX);
-    this._lastCenterX = cx;
+    // Track XZ distance travelled
+    const c = this.centerPos;
+    const dx = c.x - this._lastCenterXZ.x;
+    const dz = c.z - this._lastCenterXZ.z;
+    this.totalDistanceTravelled += Math.sqrt(dx * dx + dz * dz);
+    this._lastCenterXZ = { x: c.x, z: c.z };
 
     if (this.energy <= 0) this.dead = true;
   }
@@ -195,25 +218,23 @@ export class Agent {
   }
 
   canReproduce(): boolean {
-    // Lowered threshold so zones don't need to be monopolised to reproduce
     return this.energy > 160 && this.age > 3;
   }
 
   reproduce(): Agent {
-    this.energy -= 80; // cost leaves parent with 80+ energy (still viable)
+    this.energy -= 80;
     const c = this.centerPos;
-    const child = new Agent(
+    return new Agent(
       this.genome.mutate(),
       c.x + (Math.random() - 0.5) * 30,
       c.y,
+      c.z + (Math.random() - 0.5) * 30,
       this.generation + 1,
       this.id,
       this.hue,
     );
-    return child;
   }
 
-  /** Summarise for the inspector panel. */
   inspect() {
     return {
       id: this.id,

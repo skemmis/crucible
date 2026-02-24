@@ -1,9 +1,10 @@
 import { NeuralNet } from './NeuralNet';
 
 export interface NodeGene {
-  /** Relative offset from the body's anchor point (lowest-center). */
+  /** Relative offsets from the body's anchor point (bottom-centre of body). */
   dx: number;
-  dy: number; // negative = above anchor
+  dy: number; // positive = above ground (height offset)
+  dz: number; // depth offset
   mass: number;
   radius: number;
 }
@@ -19,8 +20,17 @@ export interface SpringGene {
   contractionRatio: number;
 }
 
-/** Sensor count must stay constant so networks stay compatible across lineages. */
-export const SENSOR_COUNT = 6; // [energy_norm, food_dx, food_dy, vel_x, sin_phase, cos_phase]
+/**
+ * Sensor layout (7 inputs):
+ *   0: energy normalised [0,1]
+ *   1: food direction dx (tanh-normalised)
+ *   2: food direction dy
+ *   3: food direction dz
+ *   4: own velocity X (tanh-normalised)
+ *   5: oscillator sin
+ *   6: oscillator cos
+ */
+export const SENSOR_COUNT = 7;
 export const HIDDEN_SIZE = 10;
 
 export class Genome {
@@ -36,7 +46,8 @@ export class Genome {
     const nodeCount = 3 + Math.floor(Math.random() * 5); // 3–7 nodes
     const nodes: NodeGene[] = Array.from({ length: nodeCount }, () => ({
       dx: (Math.random() - 0.5) * 70,
-      dy: -(Math.random() * 70),   // keep above anchor (negative y = up)
+      dy: Math.random() * 70,   // positive = above ground
+      dz: (Math.random() - 0.5) * 70,
       mass: 0.6 + Math.random() * 1.2,
       radius: 4 + Math.random() * 5,
     }));
@@ -50,8 +61,7 @@ export class Genome {
     const extras = Math.floor(Math.random() * 3);
     for (let k = 0; k < extras; k++) {
       const a = Math.floor(Math.random() * nodeCount);
-      let b = (a + 1 + Math.floor(Math.random() * (nodeCount - 1))) % nodeCount;
-      // avoid duplicate
+      const b = (a + 1 + Math.floor(Math.random() * (nodeCount - 1))) % nodeCount;
       if (!springs.some(s => (s.a === a && s.b === b) || (s.a === b && s.b === a))) {
         springs.push(Genome.randomSpring(a, b));
       }
@@ -78,15 +88,14 @@ export class Genome {
   mutate(): Genome {
     const p = (x: number, sigma: number) => x + (Math.random() - 0.5) * sigma;
 
-    // Mutate node positions / sizes
     const newNodes = this.nodes.map(n => ({
       dx: p(n.dx, 12),
-      dy: Math.min(0, p(n.dy, 12)),  // dy ≤ 0: never below anchor
+      dy: Math.max(0, p(n.dy, 12)),  // dy ≥ 0: never below ground
+      dz: p(n.dz, 12),
       mass: Math.max(0.2, p(n.mass, 0.25)),
       radius: Math.max(2, p(n.radius, 1.2)),
     }));
 
-    // Mutate spring params
     let newSprings = this.springs.map(s => ({
       ...s,
       stiffness: Math.max(20, p(s.stiffness, 40)),

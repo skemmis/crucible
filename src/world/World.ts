@@ -4,18 +4,18 @@ import { Environment } from './Environment';
 
 export interface WorldConfig {
   worldWidth: number;
-  groundY: number;
+  worldDepth: number;
   initialAgents: number;
   maxAgents: number;
   zoneCount: number;
 }
 
 export const DEFAULT_CONFIG: WorldConfig = {
-  worldWidth: 2400,
-  groundY: 0,        // set at runtime from canvas height
+  worldWidth: 1200,
+  worldDepth: 1200,
   initialAgents: 16,
   maxAgents: 60,
-  zoneCount: 6,      // sparse food → locomotion has real fitness value
+  zoneCount: 12,   // 2-D food landscape on XZ plane
 };
 
 export class World {
@@ -25,7 +25,7 @@ export class World {
   stepCount: number = 0;
 
   readonly worldWidth: number;
-  readonly groundY: number;
+  readonly worldDepth: number;
   readonly maxAgents: number;
 
   // Phylogeny log: [childId, parentId, generation, birthTime]
@@ -33,9 +33,9 @@ export class World {
 
   constructor(cfg: WorldConfig) {
     this.worldWidth = cfg.worldWidth;
-    this.groundY = cfg.groundY;
+    this.worldDepth = cfg.worldDepth;
     this.maxAgents = cfg.maxAgents;
-    this.env = new Environment(cfg.worldWidth, cfg.groundY, cfg.zoneCount);
+    this.env = new Environment(cfg.worldWidth, cfg.worldDepth, cfg.zoneCount);
 
     for (let i = 0; i < cfg.initialAgents; i++) {
       this._spawn(Genome.random());
@@ -44,12 +44,12 @@ export class World {
 
   private _spawn(genome: Genome, parentAgent?: Agent): Agent {
     const x = 50 + Math.random() * (this.worldWidth - 100);
-    // Spawn above ground so body can settle
-    const y = this.groundY - 10;
+    const z = 50 + Math.random() * (this.worldDepth - 100);
     const a = new Agent(
       genome,
       x,
-      y,
+      0,    // spawn at ground level; _develop() lifts body above Y=0
+      z,
       parentAgent?.generation ?? 0,
       parentAgent?.id ?? null,
       parentAgent?.hue ?? Math.random() * 360,
@@ -66,28 +66,24 @@ export class World {
 
     const offspring: Agent[] = [];
 
-    // Count currently-living agents so the cap check is accurate even when
-    // some agents die mid-loop (they stay in the array until pruned below).
     let liveCount = this.agents.reduce((n, a) => n + (a.dead ? 0 : 1), 0);
 
     for (const agent of this.agents) {
       if (agent.dead) continue;
 
-      // Max lifespan: forces generational turnover so elite Gen-0 agents
-      // don't block slots indefinitely.
+      // Max lifespan: forces generational turnover
       if (agent.age > 180) { agent.dead = true; liveCount--; continue; }
 
-      agent.update(dt, this.env.zones, this.groundY, this.worldWidth);
+      agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth);
       if (agent.dead) { liveCount--; continue; }
 
-      // Energy harvesting: each node that overlaps a zone absorbs energy.
+      // Energy harvesting: each node that overlaps a zone absorbs energy
       for (const node of agent.nodes) {
-        const gained = this.env.harvest(node.pos.x, node.pos.y, node.radius);
+        const gained = this.env.harvest(node.pos.x, node.pos.y, node.pos.z, node.radius);
         if (gained > 0) agent.absorbEnergy(gained * 18);
       }
 
-      // Reproduction — checked against LIVE count so dying agents free their
-      // slots in the same frame, unlocking reproduction at cap.
+      // Reproduction
       if (agent.canReproduce() && liveCount + offspring.length < this.maxAgents) {
         const child = agent.reproduce();
         offspring.push(child);
@@ -95,7 +91,6 @@ export class World {
       }
     }
 
-    // Prune dead, add offspring
     this.agents = this.agents.filter(a => !a.dead);
     this.agents.push(...offspring);
 

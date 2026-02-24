@@ -1,10 +1,11 @@
 export interface EnergyZone {
   x: number;
-  y: number;
+  y: number;   // always 0 (ground-level)
+  z: number;
   radius: number;
   energy: number;
   maxEnergy: number;
-  replenishRate: number; // energy / second
+  replenishRate: number;
 }
 
 export class Environment {
@@ -12,8 +13,8 @@ export class Environment {
 
   constructor(
     readonly worldWidth: number,
-    readonly groundY: number,
-    zoneCount: number = 6,
+    readonly worldDepth: number,
+    zoneCount: number = 12,
   ) {
     this._seed(zoneCount);
   }
@@ -22,13 +23,16 @@ export class Environment {
     for (let i = 0; i < count; i++) {
       const maxE = 80 + Math.random() * 60;
       this.zones.push({
-        // Clusters are deliberately uneven — some gaps are large, forcing agents to travel
-        x: (i + 0.2 + Math.random() * 0.6) * (this.worldWidth / count),
-        y: this.groundY,
-        radius: 45 + Math.random() * 30,   // smaller zones → scarcer resource
+        // Scatter unevenly across the XZ plane so agents must explore in 2D
+        x: (i % Math.ceil(Math.sqrt(count)) + 0.2 + Math.random() * 0.6)
+           * (this.worldWidth / Math.ceil(Math.sqrt(count))),
+        y: 0,
+        z: (Math.floor(i / Math.ceil(Math.sqrt(count))) + 0.2 + Math.random() * 0.6)
+           * (this.worldDepth / Math.ceil(Math.sqrt(count))),
+        radius: 55 + Math.random() * 40,
         energy: maxE,
         maxEnergy: maxE,
-        replenishRate: 1.5 + Math.random() * 2.5,  // slower replenish
+        replenishRate: 1.5 + Math.random() * 2.5,
       });
     }
   }
@@ -40,17 +44,21 @@ export class Environment {
   }
 
   /**
-   * Attempt to harvest energy from any zone overlapping the given circle.
-   * Returns total energy extracted this call.
+   * Attempt to harvest energy from any zone overlapping the given sphere.
+   * Distance is measured in 3-D (XYZ) but zones sit at Y=0 so it's
+   * effectively XZ-dominant when nodes are close to the ground.
    */
-  harvest(x: number, y: number, radius: number): number {
+  harvest(x: number, y: number, z: number, radius: number): number {
     let total = 0;
-    for (const z of this.zones) {
-      const dx = z.x - x;
-      const dy = z.y - y;
-      if (dx * dx + dy * dy < (z.radius + radius) * (z.radius + radius)) {
-        const take = Math.min(z.energy, 0.08); // small cap keeps zones alive under competition
-        z.energy -= take;
+    for (const zone of this.zones) {
+      const dx = zone.x - x;
+      const dy = zone.y - y;
+      const dz = zone.z - z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      const combined = zone.radius + radius;
+      if (distSq < combined * combined) {
+        const take = Math.min(zone.energy, 0.08);
+        zone.energy -= take;
         total += take;
       }
     }
