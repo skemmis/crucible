@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Crucible — ALife Sandbox</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+    canvas { display: block; }
+
+    #hud {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+
+    .panel {
+      background: rgba(0, 0, 0, 0.65);
+      border: 1px solid rgba(100, 180, 255, 0.2);
+      border-radius: 6px;
+      padding: 10px 14px;
+      color: #9cf;
+      font-size: 12px;
+      line-height: 1.7;
+      pointer-events: none;
+    }
+
+    #agent-stats { display: none; }
+
+    #controls {
+      position: fixed;
+      bottom: 10px;
+      left: 10px;
+      color: rgba(120, 160, 200, 0.55);
+      font-size: 11px;
+      font-family: 'Courier New', monospace;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+
+  <div id="hud">
+    <div class="panel" id="sim-stats">
+      <span id="stat-time">Time: 0.0s</span><br/>
+      <span id="stat-agents">Agents: 0</span><br/>
+      <span id="stat-gen">Max Gen: 0</span><br/>
+      <span id="stat-speed">Speed: 1×</span>
+    </div>
+    <div class="panel" id="agent-stats"></div>
+  </div>
+
+  <div id="controls">
+    [Space] Pause &nbsp;|&nbsp; [Scroll] Zoom &nbsp;|&nbsp; [Drag] Pan &nbsp;|&nbsp; [Click] Select Agent &nbsp;|&nbsp; [&lt;&gt;] Speed &nbsp;|&nbsp; [Esc] Deselect
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
