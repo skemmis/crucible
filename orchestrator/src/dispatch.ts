@@ -337,21 +337,30 @@ export async function handleConsensus(
 
 // ── Agent comment detection ───────────────────────────────────────────────
 // Since all agent comments are posted under the repo owner's account,
-// we detect them by their emoji header signature instead of login name.
+// we detect them by their header signature instead of login name.
+//
+// LLMs sometimes vary the header (different emoji variants, trailing "(cont.)",
+// round labels, etc.), so we use NAME-based matching rather than exact prefix
+// matching. We require the comment to start with ** and contain a known name.
 
-const AGENT_HEADERS = [
-  '**🌿 Naturalist**',
-  '**⚙️ Systems Engineer**',
-  '**🌀 Chaos Agent**',
-  '**🎮 Game Designer**',
-  '**🔬 SFI Fellow**',
-  '**🧬 Evolutionary Biologist**',
-  '**🤝 Consensus Agent**',
-  '**📋 Product Manager**',
+const AGENT_NAMES = [
+  'Naturalist',
+  'Systems Engineer',
+  'Chaos Agent',
+  'Game Designer',
+  'SFI Fellow',
+  'Evolutionary Biologist',
+  'Consensus Agent',
+  'Product Manager',
 ];
 
 export function isAgentComment(body: string): boolean {
-  return AGENT_HEADERS.some(h => body.trimStart().startsWith(h));
+  const trimmed = body.trimStart();
+  // All agent comments start with a bold header (**...**)
+  if (!trimmed.startsWith('**')) return false;
+  // Check if any known agent name appears in the first line
+  const firstLine = trimmed.split('\n')[0];
+  return AGENT_NAMES.some(name => firstLine.includes(name));
 }
 
 const BOT_LOGINS = new Set([
