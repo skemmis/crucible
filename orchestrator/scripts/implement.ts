@@ -36,14 +36,13 @@ import { getIssue, getIssueComments } from '../src/github';
 const ISSUE_NUMBER = parseInt(process.env.ISSUE_NUMBER ?? '', 10);
 if (isNaN(ISSUE_NUMBER)) throw new Error('ISSUE_NUMBER env var is not set or not a number');
 
-// When run by GitHub Actions the cwd is the repo root, so source files are
-// at ./src/  relative to where we're running. When running locally from
-// orchestrator/ the repo root is one level up.
-const REPO_ROOT = fs.existsSync(path.join(process.cwd(), 'src'))
-  ? process.cwd()
-  : path.join(process.cwd(), '..');
+// The workflow passes REPO_ROOT explicitly via env var (github.workspace).
+// Locally (running from orchestrator/) the repo root is one level up.
+// We intentionally read the GAME source files (crucible/src/), not the
+// orchestrator internals — those are implementation details, not the target.
+const REPO_ROOT = process.env.REPO_ROOT ?? path.join(process.cwd(), '..');
 
-const SOURCE_DIRS = ['src'];
+const SOURCE_DIRS = ['src']; // relative to REPO_ROOT — these are the game simulation files
 const OUTPUT_PR_BODY = path.join(process.cwd(), 'implement-pr-body.md');
 
 // ── Read source tree ───────────────────────────────────────────────────────
