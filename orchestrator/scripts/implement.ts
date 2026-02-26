@@ -206,12 +206,18 @@ async function main(): Promise<void> {
   );
 
   console.log(`[implement] Calling Claude to generate implementation…`);
-  const message = await client.messages.create({
+  // Use streaming — the SDK requires it when max_tokens is large enough that
+  // the request could exceed the 10-minute non-streaming timeout threshold.
+  const stream = client.messages.stream({
     model: 'claude-sonnet-4-6',
-    max_tokens: 24000,
-    thinking: { type: 'enabled', budget_tokens: 8000 } as any,
+    max_tokens: 16000,
+    thinking: { type: 'enabled', budget_tokens: 6000 } as any,
     messages: [{ role: 'user', content: prompt }],
   });
+
+  // Stream to stdout so GitHub Actions logs show live progress
+  stream.on('text', (text) => process.stdout.write(''));  // keep connection alive
+  const message = await stream.finalMessage();
 
   const textBlock = message.content.find(b => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') {
