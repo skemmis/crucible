@@ -1,9 +1,12 @@
 {
-  "buildCommand": null,
-  "outputDirectory": null,
+  "buildCommand": "",
+  "outputDirectory": ".",
   "functions": {
     "api/webhook.ts": {
       "maxDuration": 60
+    },
+    "api/health.ts": {
+      "maxDuration": 10
     }
   }
 }
