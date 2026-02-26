@@ -5,6 +5,7 @@ import {
   transitionLabel,
   addLabel,
   removeLabel,
+  getIssue,
   getIssueComments,
   type GitHubIssue,
   type GitHubComment,
@@ -90,7 +91,9 @@ async function postAgentResponses(
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     if (result.status === 'rejected') {
-      console.error(`[dispatch] Agent ${agentSubset[i].name} failed:`, result.reason);
+      // Log full error so it shows in Vercel function logs
+      const err = result.reason as Error;
+      console.error(`[dispatch] Agent ${agentSubset[i].name} (${agentSubset[i].provider}) FAILED: ${err?.message ?? err}`);
       continue;
     }
     await postComment(issueNumber, result.value.text);
@@ -105,6 +108,15 @@ async function postAgentResponses(
  * All six agents weigh in; label transitions proposed → debating.
  */
 export async function handleNewProposal(issue: GitHubIssue): Promise<void> {
+  // Idempotency guard — fetch *current* labels from GitHub (not the stale
+  // webhook payload) in case this event was redelivered after agents already ran
+  const freshIssue = await getIssue(issue.number);
+  const currentLabels = freshIssue.labels.map(l => l.name);
+  if (currentLabels.includes('debating')) {
+    console.log(`[dispatch] Issue #${issue.number} already debating — skipping`);
+    return;
+  }
+
   console.log(`[dispatch] New proposal: #${issue.number} "${issue.title}"`);
 
   const prompt = buildProposalPrompt(issue);
