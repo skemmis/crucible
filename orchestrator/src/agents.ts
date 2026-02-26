@@ -100,7 +100,7 @@ sharpen the debate around it. You view the debate itself as a selection pressure
     name: 'Game Designer',
     emoji: '🎮',
     provider: 'google',
-    model: 'gemini-2.5-pro',
+    model: 'gemini-2.5-flash',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Game Designer**. Your philosophy: a simulation nobody wants to watch or play \
@@ -122,7 +122,7 @@ experience.`,
     name: 'SFI Fellow',
     emoji: '🔬',
     provider: 'google',
-    model: 'gemini-2.5-pro',
+    model: 'gemini-2.5-flash',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **SFI Fellow** (Santa Fe Institute). Your philosophy: this system is a complex \
@@ -144,7 +144,7 @@ actionable — take it as a feature, not a bug. The other agents will ground you
     name: 'Evolutionary Biologist',
     emoji: '🧬',
     provider: 'google',
-    model: 'gemini-2.5-pro',
+    model: 'gemini-2.5-flash',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Evolutionary Biologist**. Your philosophy: evolution is the most powerful \

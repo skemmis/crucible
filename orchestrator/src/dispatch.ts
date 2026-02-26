@@ -87,6 +87,16 @@ async function postAgentResponses(
     agentSubset.map(agent => callAgent(agent, prompt).then(text => ({ agent, text }))),
   );
 
+  // Late idempotency guard: re-check comment count AFTER LLM calls return but
+  // BEFORE posting. Parallel webhook invocations all reach here with 0 comments,
+  // but by the time the slowest one finishes, the faster one has started posting.
+  const lateComments = await getIssueComments(issueNumber);
+  const agentAlreadyPosted = lateComments.some(c => isAgentComment(c.body));
+  if (agentAlreadyPosted) {
+    console.log(`[dispatch] Issue #${issueNumber} — late guard: agent comment already exists, skipping`);
+    return;
+  }
+
   // Post responses with a small stagger so GitHub shows them sequentially
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
