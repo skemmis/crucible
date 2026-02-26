@@ -1,4 +1,5 @@
-import { World, DEFAULT_CONFIG } from './world/World';
+```typescript
+import { World, DEFAULT_CONFIG, TelemetrySnapshot } from './world/World';
 import { Renderer } from './render/Renderer';
 
 // ── Container ──────────────────────────────────────────────────────────────────
@@ -99,6 +100,62 @@ function updateHUD(): void {
   }
 }
 
+// ── Telemetry ──────────────────────────────────────────────────────────────────
+
+const TELEMETRY_INTERVAL_MS = 60_000;
+const TELEMETRY_ENDPOINT = '/api/telemetry';
+
+/**
+ * Post a snapshot to the telemetry endpoint.
+ * Fire-and-forget — we log failures but never throw.
+ */
+function postSnapshot(snapshot: TelemetrySnapshot): void {
+  fetch(TELEMETRY_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(snapshot),
+  }).catch(err => {
+    console.warn('[telemetry] Failed to post snapshot:', err);
+  });
+}
+
+/**
+ * Capture a snapshot and optionally attach a canvas JPEG.
+ * Canvas capture is only performed when anomalies are present, keeping
+ * toDataURL() off the render hot-path.
+ */
+function captureAndPost(forceCanvasCapture: boolean = false): void {
+  // First pass: compute snapshot without canvas to check for anomalies
+  const preliminary = world.captureSnapshot();
+  const hasAnomaly = preliminary.anomalies.length > 0;
+
+  if (hasAnomaly || forceCanvasCapture) {
+    // Only do the synchronous GPU readback when we actually need an image
+    let dataUrl: string | undefined;
+    try {
+      dataUrl = renderer.renderer.domElement.toDataURL('image/jpeg', 0.4);
+    } catch {
+      // toDataURL can fail if canvas is tainted or context is lost
+      dataUrl = undefined;
+    }
+    // Re-capture with canvas attached (snapshot is cheap — no O(n²) ops)
+    const fullSnapshot = world.captureSnapshot(dataUrl);
+    postSnapshot(fullSnapshot);
+
+    if (hasAnomaly) {
+      console.info(
+        '[telemetry] Anomaly snapshot posted:',
+        fullSnapshot.anomalies.map(a => a.description).join('; '),
+      );
+    }
+  } else {
+    postSnapshot(preliminary);
+  }
+}
+
+// Periodic snapshot — every 60 seconds regardless of anomalies
+setInterval(() => captureAndPost(), TELEMETRY_INTERVAL_MS);
+
 // ── Main loop ──────────────────────────────────────────────────────────────────
 
 const FIXED_DT = 1 / 60;
@@ -125,3 +182,4 @@ function loop(): void {
 }
 
 requestAnimationFrame(loop);
+```
