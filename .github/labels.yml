@@ -1,0 +1,61 @@
+# Proposal pipeline labels
+- name: proposed
+  color: "0075ca"
+  description: New proposal, awaiting agent responses
+
+- name: debating
+  color: "e4e669"
+  description: Agents are actively discussing this proposal
+
+- name: consensus-reached
+  color: "0e8a16"
+  description: Agents agreed — ready for implementation
+
+- name: needs-rework
+  color: "e99695"
+  description: Debate ended without consensus; needs revision
+
+- name: implementing
+  color: "7057ff"
+  description: A PR is open for this proposal
+
+- name: rejected
+  color: "b60205"
+  description: Proposal rejected after agent debate
+
+- name: constitution
+  color: "f9d0c4"
+  description: Proposes an amendment to CONSTITUTION.md
+
+# Domain labels
+- name: terrain
+  color: "c5def5"
+  description: Changes to world terrain and landscape
+
+- name: sensing
+  color: "c5def5"
+  description: Changes to agent sensing and perception
+
+- name: behavior
+  color: "c5def5"
+  description: Changes to agent behavior and neural control
+
+- name: morphology
+  color: "c5def5"
+  description: Changes to agent body structure and genome
+
+- name: rendering
+  color: "c5def5"
+  description: Changes to visuals and renderer
+
+- name: physics
+  color: "c5def5"
+  description: Changes to physics simulation
+
+- name: performance
+  color: "fef2c0"
+  description: Performance-focused changes
+
+- name: player
+  color: "d4edda"
+  description: Changes related to the player entity and experience

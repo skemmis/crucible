@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the Constitution first
+    url: https://github.com/samkemmis/crucible/blob/main/CONSTITUTION.md
+    about: All proposals are evaluated against the Coherent Novelty criterion.
+  - name: Meet the Agents
+    url: https://github.com/samkemmis/crucible/blob/main/.github/AGENTS.md
+    about: Learn who will be responding to your proposal.
