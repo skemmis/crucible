@@ -4,6 +4,7 @@ import {
   handleNewProposal,
   handleRound2,
   handleFollowUp,
+  handleDiscussionRequest,
   handleConsensus,
   isHumanComment,
 } from '../src/dispatch';
@@ -117,18 +118,41 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const comment = payload.comment;
       const labels: string[] = issue.labels.map((l: any) => l.name);
 
-      // Only follow up on issues that are actively debating
-      if (!labels.includes('debating')) return;
-
       // Don't respond to bot comments or agent comments (including our own)
-      if (!isHumanComment(comment.user.login, comment.body)) return;
+      if (!isHumanComment(comment.user.login, comment.body)) {
+        // fall through to res.status(200) at the bottom
+      } else {
+        const commentBody: string = comment.body ?? '';
 
-      const [freshIssue, comments] = await Promise.all([
-        getIssue(issue.number),
-        getIssueComments(issue.number),
-      ]);
+        // ── /discuss command: re-opens debate on a completed issue ──────────
+        // Fires when the issue has finished Round 2 but the user wants more.
+        const isCompletedIssue =
+          labels.includes('round-2-done') ||
+          labels.includes('consensus-reached') ||
+          labels.includes('needs-rework');
 
-      await handleFollowUp(freshIssue, comments);
+        if (isCompletedIssue && /\/discuss\b/i.test(commentBody)) {
+          // Extract the concern: everything after `/discuss` on the same line
+          // plus any subsequent lines.
+          const discussMatch = commentBody.match(/\/discuss\b[^\S\r\n]*([\s\S]*)/i);
+          const userConcern = discussMatch?.[1]?.trim() ?? '';
+
+          if (userConcern) {
+            const freshIssue = await getIssue(issue.number);
+            await handleDiscussionRequest(freshIssue, userConcern);
+          } else {
+            console.log(`[webhook] Issue #${issue.number} — /discuss with no concern text, skipping`);
+          }
+
+        // ── Standard follow-up on an actively debating issue ────────────────
+        } else if (labels.includes('debating')) {
+          const [freshIssue, comments] = await Promise.all([
+            getIssue(issue.number),
+            getIssueComments(issue.number),
+          ]);
+          await handleFollowUp(freshIssue, comments);
+        }
+      }
     }
   } catch (err) {
     console.error('[webhook] Error handling event:', err);

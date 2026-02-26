@@ -23,6 +23,10 @@
   color: "e99695"
   description: Debate ended without consensus; needs revision
 
+- name: needs-more-discussion
+  color: "fbca04"
+  description: User requested additional focused debate via /discuss
+
 - name: implementing
   color: "7057ff"
   description: A PR is open for this proposal

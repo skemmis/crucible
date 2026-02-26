@@ -115,6 +115,77 @@ ${thread}
 Add your take. You can agree, disagree, or introduce a new angle. ~200–300 words.`;
 }
 
+function buildRound3AgentPrompt(
+  issue: GitHubIssue,
+  priorComments: GitHubComment[],
+  userConcern: string,
+): string {
+  const thread = priorComments
+    .map(c => `**${c.user.login}** (${new Date(c.created_at).toLocaleDateString()}):\n${c.body}`)
+    .join('\n\n---\n\n');
+
+  return `\
+A user has requested additional focused debate on a Crucible proposal that has already \
+completed its standard two rounds. Read the full prior debate thread, then address the \
+specific concern the user has raised.
+
+**Issue #${issue.number}: ${issue.title}**
+
+${issue.body ?? '(no description provided)'}
+
+**Prior debate thread (Rounds 1 & 2):**
+
+${thread}
+
+---
+
+**User's specific concern (posted via /discuss):**
+
+${userConcern}
+
+---
+
+Respond as your persona. Address the user's concern directly — do not just re-state your \
+prior position unless it is directly relevant. You may update your view if the concern \
+reveals something you missed. ~200–300 words.`;
+}
+
+function buildPMRound3Prompt(
+  issue: GitHubIssue,
+  allComments: GitHubComment[],
+  userConcern: string,
+): string {
+  const thread = allComments
+    .map(c => `**${c.user.login}**:\n${c.body}`)
+    .join('\n\n---\n\n');
+
+  return `\
+A user triggered a focused Round 3 debate on a Crucible proposal using the /discuss command. \
+Read the full thread (all prior rounds plus the new Round 3 responses), then synthesize \
+and call a verdict that specifically addresses whether the user's concern has been resolved.
+
+**Issue #${issue.number}: ${issue.title}**
+
+**Original proposal:**
+${issue.body ?? '(no description provided)'}
+
+**User's specific concern that triggered Round 3:**
+${userConcern}
+
+**Full debate thread (all rounds):**
+
+${thread}
+
+---
+
+Write your Round 3 synthesis (200–250 words):
+(a) State whether the user's concern was addressed by the Round 3 responses.
+(b) Note any new cruxes the concern surfaced.
+(c) Call one of:
+- ✅ PRELIMINARY CONSENSUS — state clearly what to build
+- 🔄 NEEDS MORE DEBATE — state exactly what is still unresolved`;
+}
+
 function buildConsensusPrompt(issue: GitHubIssue, comments: GitHubComment[]): string {
   const thread = comments
     .map(c => `**${c.user.login}**:\n${c.body}`)
@@ -310,6 +381,57 @@ export async function handleFollowUp(
 
   const prompt = buildFollowUpPrompt(issue, comments);
   await postAgentResponses(issue.number, prompt, respondents, true); // follow-ups have no strict guard
+}
+
+/**
+ * Called when a human posts a comment containing `/discuss` on an issue that
+ * has completed Round 2 (round-2-done, consensus-reached, or needs-rework).
+ * All six agents respond to the user's specific concern; PM synthesizes and
+ * calls a new verdict.
+ *
+ * The `userConcern` is the text extracted from after `/discuss` in the comment.
+ */
+export async function handleDiscussionRequest(
+  issue: GitHubIssue,
+  userConcern: string,
+): Promise<void> {
+  // Mark issue as needing more discussion (also acts as idempotency signal)
+  await addLabel(issue.number, 'needs-more-discussion');
+
+  // Idempotency guard: check whether Round 3 agents have already posted
+  // since the last PM comment (prevents duplicate webhook invocations from
+  // double-processing the same /discuss event).
+  const existingComments = await getIssueComments(issue.number);
+  const pmHeader = '**📋 Product Manager**';
+  const lastPmIdx = existingComments.reduce(
+    (last, c, i) => (c.body.trimStart().startsWith(pmHeader) ? i : last),
+    -1,
+  );
+  const commentsAfterLastPM = existingComments.slice(lastPmIdx + 1);
+  if (commentsAfterLastPM.some(c => isAgentComment(c.body))) {
+    console.log(`[dispatch] Issue #${issue.number} — Round 3 already posted for this /discuss, skipping`);
+    return;
+  }
+
+  console.log(`[dispatch] /discuss on #${issue.number} — Round 3 starting. Concern: "${userConcern.slice(0, 80)}…"`);
+
+  // ── Round 3: all six agents address the user's concern ───────────────────
+  const round3Prompt = buildRound3AgentPrompt(issue, existingComments, userConcern);
+  const agentsPosted = await postAgentResponses(issue.number, round3Prompt, AGENTS, true);
+
+  if (!agentsPosted) {
+    console.log(`[dispatch] Issue #${issue.number} — Round 3 agents skipped, aborting PM verdict`);
+    return;
+  }
+
+  // ── PM Round 3 synthesis ─────────────────────────────────────────────────
+  const fullComments = await getIssueComments(issue.number);
+  const pmRound3Prompt = buildPMRound3Prompt(issue, fullComments, userConcern);
+  console.log(`[dispatch] PM calling Round 3 verdict for issue #${issue.number}…`);
+  const pmVerdict = await callAgent(PM_AGENT, pmRound3Prompt);
+  await postComment(issue.number, pmVerdict);
+
+  console.log(`[dispatch] Issue #${issue.number} — Round 3 complete`);
 }
 
 /**
