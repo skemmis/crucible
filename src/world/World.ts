@@ -16,7 +16,7 @@ export const DEFAULT_CONFIG: WorldConfig = {
   worldDepth: 1200,
   initialAgents: 16,
   maxAgents: 60,
-  zoneCount: 12,   // 2-D food landscape on XZ plane
+  zoneCount: 24,   // increased from 12 → 24 to distribute agents and reduce bottlenecking
 };
 
 // ── Telemetry types ────────────────────────────────────────────────────────────
@@ -40,6 +40,14 @@ export interface TelemetrySnapshot {
   // Metric 4: spatial entropy of agent positions in a 16×16 grid
   spatialEntropy: number;
 
+  // Metric 5: variance in per-agent energy-acquisition rate (crowding diagnostic)
+  // High variance = niche differentiation forming; low variance = scramble competition
+  energyAcquisitionVariance: number;
+
+  // Metric 6: morphological variance broken down by generation bucket
+  // Tracks whether crowding causes convergence (collapse) or divergence (niche carving)
+  morphologicalVarianceByGeneration: GenerationVarianceBucket[];
+
   // Population basics
   agentCount: number;
   meanEnergy: number;
@@ -50,6 +58,14 @@ export interface TelemetrySnapshot {
 
   // Optional low-res canvas snapshot — only populated when anomaly fires
   canvasSnapshot?: string;
+}
+
+export interface GenerationVarianceBucket {
+  /** Generation range label, e.g. "0–9", "10–19", "20+" */
+  label: string;
+  agentCount: number;
+  /** Mean L2 morphological distance from the bucket's own centroid */
+  morphVariance: number;
 }
 
 export interface AnomalyFlag {
@@ -180,6 +196,10 @@ export class World {
 
   readonly telemetry: TelemetryTracker = new TelemetryTracker();
 
+  // Per-agent energy gained in the current frame (keyed by agent id)
+  // Used to compute energy-acquisition variance for the crowding diagnostic
+  private _frameEnergyGained: Map<number, number> = new Map();
+
   constructor(cfg: WorldConfig) {
     this.worldWidth = cfg.worldWidth;
     this.worldDepth = cfg.worldDepth;
@@ -214,6 +234,9 @@ export class World {
     this.telemetry.advanceFrame();
     this.env.update(dt);
 
+    // Reset per-frame energy tracking
+    this._frameEnergyGained.clear();
+
     const offspring: Agent[] = [];
 
     let liveCount = this.agents.reduce((n, a) => n + (a.dead ? 0 : 1), 0);
@@ -237,10 +260,16 @@ export class World {
       }
 
       // Energy harvesting: each node that overlaps a zone absorbs energy
+      let frameGained = 0;
       for (const node of agent.nodes) {
         const gained = this.env.harvest(node.pos.x, node.pos.y, node.pos.z, node.radius);
-        if (gained > 0) agent.absorbEnergy(gained * 18);
+        if (gained > 0) {
+          const absorbed = gained * 18;
+          agent.absorbEnergy(absorbed);
+          frameGained += absorbed;
+        }
       }
+      this._frameEnergyGained.set(agent.id, frameGained);
 
       // Reproduction
       if (agent.canReproduce() && liveCount + offspring.length < this.maxAgents) {
@@ -292,6 +321,18 @@ export class World {
     // ── Metric 4: spatial entropy (16×16 grid, O(n)) ──────────────────────────
     const spatialEntropy = this._computeSpatialEntropy();
 
+    // ── Metric 5: energy-acquisition variance ─────────────────────────────────
+    // A crowding/niche-differentiation diagnostic.
+    // If crowding is producing scramble competition, all agents get roughly the
+    // same (low) energy per frame → low variance.
+    // If niches are forming, some agents reliably out-acquire others → high variance.
+    const energyAcquisitionVariance = this._computeEnergyAcquisitionVariance();
+
+    // ── Metric 6: morphological variance by generation bucket ─────────────────
+    // Tells us whether selection is differentiating body plans across generations
+    // or driving convergence. Collapsing variance per bucket = scramble selection.
+    const morphologicalVarianceByGeneration = this._computeMorphologicalVarianceByGeneration();
+
     // ── Population basics (O(n)) ──────────────────────────────────────────────
     let meanEnergy = 0;
     for (const a of this.agents) meanEnergy += a.energy;
@@ -309,6 +350,7 @@ export class World {
       ['spatialEntropy', spatialEntropy],
       ['meanEnergy', meanEnergy],
       ['diversityDelta', Math.abs(diversityDelta)],
+      ['energyAcquisitionVariance', energyAcquisitionVariance],
     ];
     for (const [metric, value] of checks) {
       const flag = this.telemetry.checkAnomaly(metric, value);
@@ -325,6 +367,8 @@ export class World {
       birthDeathRatio,
       diversityDelta,
       spatialEntropy,
+      energyAcquisitionVariance,
+      morphologicalVarianceByGeneration,
       agentCount: n,
       meanEnergy,
       stddevEnergy,
@@ -407,6 +451,104 @@ export class World {
       }
     }
     return entropy;
+  }
+
+  /**
+   * Variance in per-agent energy-acquisition rate across the current frame.
+   * Uses the _frameEnergyGained map populated during update().
+   *
+   * Low variance → all agents acquiring similar energy → undifferentiated scramble.
+   * Rising variance → some agents reliably out-acquire others → niche formation.
+   */
+  private _computeEnergyAcquisitionVariance(): number {
+    const n = this.agents.length;
+    if (n < 2) return 0;
+
+    let sum = 0;
+    for (const agent of this.agents) {
+      sum += this._frameEnergyGained.get(agent.id) ?? 0;
+    }
+    const mean = sum / n;
+
+    let varSum = 0;
+    for (const agent of this.agents) {
+      const gained = this._frameEnergyGained.get(agent.id) ?? 0;
+      varSum += (gained - mean) ** 2;
+    }
+    return varSum / n;
+  }
+
+  /**
+   * For each generation bucket (0–9, 10–19, 20–49, 50+), compute the mean
+   * morphological L2 distance from that bucket's own centroid.
+   *
+   * If crowding drives convergence, variance should collapse toward zero for
+   * mature generation buckets. If niches are forming, variance should remain
+   * high or grow. This is the primary "is crowding doing useful work?" signal.
+   */
+  private _computeMorphologicalVarianceByGeneration(): GenerationVarianceBucket[] {
+    const FEATURES_PER_NODE = 5;
+    const MAX_NODES = 7;
+    const K = MAX_NODES * FEATURES_PER_NODE;
+
+    // Define buckets: [label, minGen, maxGen (exclusive)]
+    const bucketDefs: Array<[string, number, number]> = [
+      ['0–9',   0,  10],
+      ['10–19', 10, 20],
+      ['20–49', 20, 50],
+      ['50+',   50, Infinity],
+    ];
+
+    const results: GenerationVarianceBucket[] = [];
+
+    for (const [label, minGen, maxGen] of bucketDefs) {
+      const bucket = this.agents.filter(
+        a => a.generation >= minGen && a.generation < maxGen,
+      );
+      if (bucket.length < 2) {
+        results.push({ label, agentCount: bucket.length, morphVariance: 0 });
+        continue;
+      }
+
+      // Compute centroid for this bucket
+      const centroid = new Float64Array(K);
+      for (const agent of bucket) {
+        const nodes = agent.genome.nodes.slice(0, MAX_NODES);
+        for (let i = 0; i < nodes.length; i++) {
+          const base = i * FEATURES_PER_NODE;
+          centroid[base + 0] += nodes[i].dx;
+          centroid[base + 1] += nodes[i].dy;
+          centroid[base + 2] += nodes[i].dz;
+          centroid[base + 3] += nodes[i].mass;
+          centroid[base + 4] += nodes[i].radius;
+        }
+      }
+      for (let j = 0; j < K; j++) centroid[j] /= bucket.length;
+
+      // Mean L2 distance from bucket centroid
+      let totalDist = 0;
+      for (const agent of bucket) {
+        const nodes = agent.genome.nodes.slice(0, MAX_NODES);
+        let distSq = 0;
+        for (let i = 0; i < nodes.length; i++) {
+          const base = i * FEATURES_PER_NODE;
+          distSq += (nodes[i].dx    - centroid[base + 0]) ** 2;
+          distSq += (nodes[i].dy    - centroid[base + 1]) ** 2;
+          distSq += (nodes[i].dz    - centroid[base + 2]) ** 2;
+          distSq += (nodes[i].mass  - centroid[base + 3]) ** 2;
+          distSq += (nodes[i].radius - centroid[base + 4]) ** 2;
+        }
+        totalDist += Math.sqrt(distSq);
+      }
+
+      results.push({
+        label,
+        agentCount: bucket.length,
+        morphVariance: totalDist / bucket.length,
+      });
+    }
+
+    return results;
   }
 
   get stats() {
