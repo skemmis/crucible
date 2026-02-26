@@ -35,24 +35,23 @@ export async function callAgent(agent: AgentConfig, userPrompt: string): Promise
   }
 }
 
-// ── Claude (extended thinking via beta API) ────────────────────────────────
-// claude-3-7-sonnet supports extended thinking through the beta.messages endpoint.
-// The response contains both <thinking> blocks (internal chain-of-thought) and
+// ── Claude (extended thinking via standard API) ───────────────────────────
+// claude-sonnet-4-6 supports extended thinking natively through the standard
+// messages API. The response contains thinking blocks (internal reasoning) and
 // text blocks — we discard the thinking blocks and return only the text.
 
 async function callClaude(agent: AgentConfig, userPrompt: string): Promise<string> {
   const client = anthropicClient();
 
-  const message = await client.beta.messages.create({
+  const message = await client.messages.create({
     model: agent.model,
     max_tokens: 16000,        // must be ≥ budget_tokens + expected output
     thinking: {
       type: 'enabled',
       budget_tokens: 8000,    // up to 8k tokens of internal reasoning
-    },
+    } as any,                 // thinking is natively supported; cast for SDK compat
     system: agent.systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
-    // No extra betas needed — beta.messages.create() handles thinking internally
   });
 
   // Extended thinking responses intermix thinking blocks and text blocks.

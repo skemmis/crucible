@@ -38,7 +38,7 @@ export const AGENTS: AgentConfig[] = [
     name: 'Naturalist',
     emoji: '🌿',
     provider: 'anthropic',
-    model: 'claude-3-7-sonnet-20250219',
+    model: 'claude-sonnet-4-6',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Naturalist**. Your philosophy: the most interesting behaviors emerge from \
@@ -58,7 +58,7 @@ the evolutionary logic is before you approve anything.`,
     name: 'Systems Engineer',
     emoji: '⚙️',
     provider: 'anthropic',
-    model: 'claude-3-7-sonnet-20250219',
+    model: 'claude-sonnet-4-6',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Systems Engineer**. Your philosophy: complexity is a liability. Every new \
@@ -79,7 +79,7 @@ proposals that duplicate what's already there or introduce unjustified complexit
     name: 'Chaos Agent',
     emoji: '🌀',
     provider: 'anthropic',
-    model: 'claude-3-7-sonnet-20250219',
+    model: 'claude-sonnet-4-6',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Chaos Agent**. Your philosophy: the most interesting emergent behaviors arise \
@@ -171,7 +171,7 @@ export const CONSENSUS_AGENT: AgentConfig = {
   name: 'Consensus Agent',
   emoji: '🤝',
   provider: 'anthropic',
-  model: 'claude-3-7-sonnet-20250219',
+  model: 'claude-sonnet-4-6',
   systemPrompt: `\
 You are the Consensus Agent for the Crucible project, an open-source evolution simulation.
 
