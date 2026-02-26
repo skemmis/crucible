@@ -633,7 +633,8 @@ export class World {
     // ── stabilityScore ────────────────────────────────────────────────────────
     // Gaussian bell centred at birthDeathRatio = 1.0.
     // Width chosen so the score is ~0.5 at the gate edges (0.85 / 1.15).
-    const stabilityScore = Math.exp(-((birthDeathRatio - 1.0) / 0.2) ** 2);
+    const _t = (birthDeathRatio - 1.0) / 0.2;
+    const stabilityScore = Math.exp(-(_t * _t));
 
     // ── spatialScore ──────────────────────────────────────────────────────────
     // Shannon entropy normalised by theoretical maximum (log2(GRID_SIZE²)).
