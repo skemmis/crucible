@@ -52,7 +52,7 @@ async function callClaude(agent: AgentConfig, userPrompt: string): Promise<strin
     },
     system: agent.systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
-    betas: ['interleaved-thinking-2025-05-14'],
+    // No extra betas needed — beta.messages.create() handles thinking internally
   });
 
   // Extended thinking responses intermix thinking blocks and text blocks.
@@ -65,9 +65,8 @@ async function callClaude(agent: AgentConfig, userPrompt: string): Promise<strin
 }
 
 // ── Gemini (reasoning via gemini-2.5-pro) ─────────────────────────────────
-// gemini-2.5-pro has built-in thinking. Setting thinkingBudget to -1 enables
-// dynamic (automatic) reasoning — the model decides how much to think based
-// on prompt complexity.
+// gemini-2.5-pro has built-in thinking. thinkingBudget sets the token budget
+// for internal reasoning; 5000 is a good balance of quality vs. latency.
 
 async function callGemini(agent: AgentConfig, userPrompt: string): Promise<string> {
   const client = googleClient();
@@ -79,9 +78,8 @@ async function callGemini(agent: AgentConfig, userPrompt: string): Promise<strin
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     // thinkingConfig supported in @google/generative-ai ≥0.24.0
-    // thinkingBudget: -1 = dynamic (model decides), 0 = disabled
     generationConfig: {
-      thinkingConfig: { thinkingBudget: -1 },
+      thinkingConfig: { thinkingBudget: 5000 },
     } as any,
   });
 
