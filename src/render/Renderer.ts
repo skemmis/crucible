@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { World } from '../world/World';
 import { Agent } from '../agent/Agent';
-import { EnergyZone } from '../world/Environment';
+import { EnergyZone, CorpseDepot } from '../world/Environment';
 import { Heightfield } from '../world/Heightfield';
 
 // Pre-allocate generous upper bounds — never reallocate during the sim
@@ -16,9 +16,16 @@ const TIER_COLORS = [
   new THREE.Color(0xff8c00),   // 2: high   — amber
 ];
 
+// Corpse visual colour — dark brownish-red
+const CORPSE_COLOR = new THREE.Color(0x8b2020);
+
 interface ZoneVisual {
   disc: THREE.Mesh;
   stem: THREE.Mesh | null; // null for ground-tier zones
+}
+
+interface CorpseVisual {
+  disc: THREE.Mesh;
 }
 
 export class Renderer {
@@ -42,6 +49,9 @@ export class Renderer {
 
   // ── energy zones ──
   private _zoneVisuals: ZoneVisual[] = [];
+
+  // ── corpse depot visuals ──
+  private _corpseVisuals: CorpseVisual[] = [];
 
   // ── selection indicator ──
   private _selectionRing: THREE.Mesh;
@@ -272,6 +282,30 @@ export class Renderer {
     }
   }
 
+  // ── Corpse visual pool ────────────────────────────────────────────────────────
+
+  /**
+   * Grow the corpse visual pool to match the current number of corpse depots.
+   * Corpses are rendered as small dark-red discs on the ground surface.
+   */
+  private _ensureCorpseVisuals(count: number): void {
+    while (this._corpseVisuals.length < count) {
+      const discGeo = new THREE.CircleGeometry(1, 16);
+      discGeo.rotateX(-Math.PI / 2);
+      const discMat = new THREE.MeshBasicMaterial({
+        color: CORPSE_COLOR.clone(),
+        transparent: true,
+        opacity: 0.6,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const disc = new THREE.Mesh(discGeo, discMat);
+      disc.visible = false;
+      this.scene.add(disc);
+      this._corpseVisuals.push({ disc });
+    }
+  }
+
   // ── Main render loop ──────────────────────────────────────────────────────────
 
   render(world: World): void {
@@ -283,6 +317,7 @@ export class Renderer {
     }
 
     this._renderZones(world);
+    this._renderCorpses(world);
     this._renderAgents(world);
     this._renderSelection(world.heightfield);
 
@@ -325,6 +360,34 @@ export class Renderer {
     for (let i = zones.length; i < this._zoneVisuals.length; i++) {
       this._zoneVisuals[i].disc.visible = false;
       if (this._zoneVisuals[i].stem) this._zoneVisuals[i].stem!.visible = false;
+    }
+  }
+
+  // ── Corpse rendering ──────────────────────────────────────────────────────────
+
+  private _renderCorpses(world: World): void {
+    const corpses = world.env.corpseDepots;
+    this._ensureCorpseVisuals(corpses.length);
+
+    for (let i = 0; i < corpses.length; i++) {
+      const corpse = corpses[i];
+      const vis = this._corpseVisuals[i];
+      const fillRatio = corpse.maxEnergy > 0 ? corpse.energy / corpse.maxEnergy : 0;
+
+      vis.disc.visible = fillRatio > 0.02;
+      if (!vis.disc.visible) continue;
+
+      // Sit just above the terrain surface
+      const discY = world.heightfield.heightAt(corpse.x, corpse.z) + 0.6;
+      vis.disc.scale.set(corpse.radius, 1, corpse.radius);
+      vis.disc.position.set(corpse.x, discY, corpse.z);
+      // Fade as the corpse decays
+      (vis.disc.material as THREE.MeshBasicMaterial).opacity = 0.15 + fillRatio * 0.55;
+    }
+
+    // Hide unused corpse visuals
+    for (let i = corpses.length; i < this._corpseVisuals.length; i++) {
+      this._corpseVisuals[i].disc.visible = false;
     }
   }
 

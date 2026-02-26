@@ -246,6 +246,17 @@ export class World {
     return a;
   }
 
+  /**
+   * Deposit a corpse depot for a dying agent if it has meaningful energy.
+   * The corpse is placed at ground level directly below the agent's centre
+   * so that ground-level scavengers can reach it without needing height.
+   */
+  private _depositCorpse(agent: Agent): void {
+    const c = agent.centerPos;
+    const groundY = this.heightfield.heightAt(c.x, c.z);
+    this.env.addCorpse(c.x, groundY, c.z, agent.energy);
+  }
+
   update(dt: number): void {
     this.time += dt;
     this.stepCount++;
@@ -262,8 +273,10 @@ export class World {
     for (const agent of this.agents) {
       if (agent.dead) continue;
 
-      // Max lifespan: forces generational turnover
+      // Max lifespan: forces generational turnover.
+      // Deposit a corpse — old agents may still have significant energy.
       if (agent.age > 180) {
+        this._depositCorpse(agent);
         agent.dead = true;
         liveCount--;
         this.telemetry.recordDeath();
@@ -271,13 +284,16 @@ export class World {
       }
 
       agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield);
+
+      // Energy-starvation death: agent.energy hit 0 inside update().
+      // Nothing to deposit (energy ≤ 0), but we still record the death.
       if (agent.dead) {
         liveCount--;
         this.telemetry.recordDeath();
         continue;
       }
 
-      // Energy harvesting: each node that overlaps a zone absorbs energy
+      // Energy harvesting: each node that overlaps a zone or corpse absorbs energy
       let frameGained = 0;
       for (const node of agent.nodes) {
         const gained = this.env.harvest(node.pos.x, node.pos.y, node.pos.z, node.radius);
