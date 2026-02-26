@@ -10,6 +10,37 @@ export interface EnergyZone {
 }
 
 /**
+ * A temporary energy depot left when an agent dies.
+ * Decays to zero with no replenishment — corpses rot.
+ */
+export interface CorpseDepot {
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  energy: number;
+  /** Initial energy, used for rendering fill level. */
+  maxEnergy: number;
+  /** Energy lost per second. Corpse lasts ~CORPSE_LIFETIME_S seconds. */
+  decayRate: number;
+}
+
+/** How many seconds a corpse at full energy takes to fully decay. */
+const CORPSE_LIFETIME_S = 20;
+
+/** Radius of a corpse depot in world units. */
+const CORPSE_RADIUS = 18;
+
+/** Fraction of the dying agent's energy deposited into the corpse. */
+const CORPSE_ENERGY_FRACTION = 0.40;
+
+/** Minimum energy to bother creating a corpse (below this it's not worth tracking). */
+const CORPSE_MIN_ENERGY = 4;
+
+/** Harvest rate from a corpse per frame when a node overlaps (matches food zone rate). */
+const CORPSE_HARVEST_RATE = 0.08;
+
+/**
  * Three-tier food landscape:
  *
  *  Tier 0 — ground (Y=0):  large zones, moderate energy, easy to reach
@@ -21,6 +52,9 @@ export interface EnergyZone {
  */
 export class Environment {
   zones: EnergyZone[] = [];
+
+  /** Decaying energy depots left by dead agents. */
+  corpseDepots: CorpseDepot[] = [];
 
   constructor(
     readonly worldWidth: number,
@@ -84,18 +118,54 @@ export class Environment {
   }
 
   update(dt: number): void {
+    // Replenish food zones
     for (const z of this.zones) {
       z.energy = Math.min(z.maxEnergy, z.energy + z.replenishRate * dt);
+    }
+
+    // Decay corpse depots and remove exhausted ones
+    for (let i = this.corpseDepots.length - 1; i >= 0; i--) {
+      const c = this.corpseDepots[i];
+      c.energy -= c.decayRate * dt;
+      if (c.energy <= 0) {
+        this.corpseDepots.splice(i, 1);
+      }
     }
   }
 
   /**
-   * Attempt to harvest energy from any zone overlapping the given sphere.
+   * Deposit a corpse energy depot at the given world position.
+   * Called by World when an agent dies with meaningful energy remaining.
+   *
+   * @param x  World X position of the corpse centre.
+   * @param y  World Y position (terrain height at that XZ).
+   * @param z  World Z position of the corpse centre.
+   * @param agentEnergy  The agent's energy at the moment of death.
+   */
+  addCorpse(x: number, y: number, z: number, agentEnergy: number): void {
+    const energy = agentEnergy * CORPSE_ENERGY_FRACTION;
+    if (energy < CORPSE_MIN_ENERGY) return;
+
+    this.corpseDepots.push({
+      x,
+      y,
+      z,
+      radius: CORPSE_RADIUS,
+      energy,
+      maxEnergy: energy,
+      decayRate: energy / CORPSE_LIFETIME_S,
+    });
+  }
+
+  /**
+   * Attempt to harvest energy from any food zone overlapping the given sphere.
    * Uses full 3D distance — nodes must be physically near the zone centre
    * (including matching height for elevated zones).
    */
   harvest(x: number, y: number, z: number, radius: number): number {
     let total = 0;
+
+    // Harvest from food zones
     for (const zone of this.zones) {
       const dx = zone.x - x;
       const dy = zone.y - y;
@@ -108,6 +178,21 @@ export class Environment {
         total += take;
       }
     }
+
+    // Harvest from corpse depots
+    for (const depot of this.corpseDepots) {
+      const dx = depot.x - x;
+      const dy = depot.y - y;
+      const dz = depot.z - z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      const combined = depot.radius + radius;
+      if (distSq < combined * combined) {
+        const take = Math.min(depot.energy, CORPSE_HARVEST_RATE);
+        depot.energy -= take;
+        total += take;
+      }
+    }
+
     return total;
   }
 }
