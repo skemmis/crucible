@@ -1,31 +1,25 @@
 ## Summary
-
-- Adds a lightweight telemetry pipeline that captures evolutionary trajectory metrics every 60 seconds and routes them back to the governance system so agents can observe simulation outcomes when evaluating proposals.
-- Implements exactly the four O(n)/O(nk) metrics agreed in consensus: rolling genome centroid distance (diversity), birth/death ratio trend over 500 frames, diversity rate of change, and spatial grid entropy — no O(n²) pairwise diff, no continuous `toDataURL`.
-- Canvas snapshots are only taken when an anomaly fires (>2σ deviation from rolling baseline), keeping the GPU readback off the render hot-path.
-- Agent prompts receive delta-formatted summaries (`current`, `Δ last 5`, `Δ last 20`, `trend`) rather than raw snapshots, so agents reason about trajectory not instantaneous state. Storage uses Vercel KV (not Gist) to avoid race conditions with concurrent tabs.
+- Increased `zoneCount` from 12 → 24 in `DEFAULT_CONFIG` — the primary Sprint 1 config change agreed by consensus, redistributing food across more zones to reduce bottleneck clustering around 12 fixed attractors
+- Added `energyAcquisitionVariance` metric to telemetry: tracks per-agent energy gained each frame; low variance signals undifferentiated scramble competition, rising variance signals niche formation — the key crowding diagnostic the panel requested
+- Added `morphologicalVarianceByGeneration` metric: computes mean morphological distance from the bucket centroid for four generation cohorts (0–9, 10–19, 20–49, 50+); collapsing variance across generations is the measurable signal that crowding is homogenising rather than differentiating
+- No world size, agent count, or agent radius changes — held per consensus; depletable zones explicitly deferred to Sprint 2
 
 ## Changes
-
 **`src/world/World.ts`**
-Adds `TelemetryTracker` (ring-buffer birth/death counts, rolling diversity history, per-metric anomaly baseline) and `World.captureSnapshot()` — the four consensus metrics plus population basics and anomaly flags. Also records births and deaths inline in `update()` via `telemetry.recordBirth()` / `recordDeath()`, and updates the rolling diversity history each frame using `_computeGenomeDiversity()` (O(nk), fixed feature vector capped at 7 nodes).
-
-**`src/main.ts`**
-Adds a 60-second `setInterval` that calls `captureAndPost()`. Anomaly detection is done by inspecting the preliminary snapshot; `toDataURL` is only called if anomalies are present or a force-capture is requested. Posts JSON to `/api/telemetry` as fire-and-forget.
-
-**`api/telemetry.ts`** *(new)*
-Vercel serverless endpoint. Receives snapshot JSON, validates required fields, prepends to a capped Redis LIST in Vercel KV (`crucible:telemetry:snapshots`, max 100 entries), and writes a quick-read `crucible:telemetry:latest` key. Returns `200 { ok: true }`.
-
-**`orchestrator/src/telemetry.ts`** *(new)*
-Client-side helper for the orchestrator. `fetchRecentSnapshots(n)` reads from Vercel KV. `buildSummary()` computes per-metric `{current, delta5, delta20, trend}` structs and de-duplicates recent anomaly flags. `formatForPrompt()` renders a Markdown table with delta-first formatting. `buildTelemetryPromptSection()` is the single export for dispatch.ts to call — it fetches, summarises, and formats in one step, returning an empty stub if no data is available yet.
+- `DEFAULT_CONFIG.zoneCount`: `12` → `24`
+- Added `GenerationVarianceBucket` interface to exports
+- Extended `TelemetrySnapshot` with `energyAcquisitionVariance: number` and `morphologicalVarianceByGeneration: GenerationVarianceBucket[]`
+- Added `_frameEnergyGained: Map<number, number>` field on `World`; populated in `update()` during the harvest loop
+- Added `_computeEnergyAcquisitionVariance()` — O(n), uses the frame map
+- Added `_computeMorphologicalVarianceByGeneration()` — O(nk) over four generation buckets, same feature encoding as existing `_computeGenomeDiversity`
+- Both new metrics wired into `captureSnapshot()`; `energyAcquisitionVariance` also added to the anomaly-detection checks
 
 ## Test plan
 - [ ] Run `npm run dev` and verify the simulation starts without errors
-- [ ] Open the browser console and confirm no errors appear at startup
-- [ ] Wait 60 seconds and verify `[telemetry]` log entries appear (or a `Failed to post` warning if KV is unconfigured — both are acceptable)
-- [ ] Trigger a fast population crash (open console, `sim.world.agents.forEach(a => a.dead = true)`) and confirm an anomaly snapshot is logged within the next telemetry cycle
-- [ ] Verify the canvas JPEG is only attached when anomalies are present (check the JSON body in the network tab)
-- [ ] With `KV_REST_API_URL` and `KV_REST_API_TOKEN` set, hit `POST /api/telemetry` with a valid snapshot body and confirm `200 { ok: true }`
-- [ ] Call `buildTelemetryPromptSection()` from the orchestrator context and confirm it returns a Markdown table with delta columns
+- [ ] Confirm 24 zone discs render across the world (more evenly spread than before)
+- [ ] Let the simulation run for ~200 generations; open devtools and call `sim.world.captureSnapshot()` — verify `energyAcquisitionVariance` and `morphologicalVarianceByGeneration` are present and non-zero
+- [ ] Verify `morphologicalVarianceByGeneration` buckets populate correctly as generation count grows (early runs will only have the `0–9` bucket populated)
+- [ ] Check browser console for runtime errors
+- [ ] Visually confirm agents are less clumped than with 12 zones
 
-Closes #10
+Closes #12
