@@ -21,16 +21,36 @@ export interface SpringGene {
 }
 
 /**
- * Sensor layout (7 inputs):
- *   0: energy normalised [0,1]
- *   1: food direction dx (tanh-normalised)
- *   2: food direction dy
- *   3: food direction dz
- *   4: own velocity X (tanh-normalised)
- *   5: oscillator sin
- *   6: oscillator cos
+ * Sensor input layout — 12 inputs.
+ *
+ * This layout is the single source of truth for what agents can perceive.
+ * Every slot is listed here; no sense is silently "always on" or scattered
+ * across multiple files.  When Option 3 (evolvable sense allocation) is built,
+ * this table becomes the sense registry that genomes index into.
+ *
+ * Slot | Signal                        | Range   | Notes
+ * -----|-------------------------------|---------|------------------------------
+ *  0   | Own energy (normalised)       | [0, 1]  | energy / 250, clamped
+ *  1   | Food direction X (tanh)       | [-1, 1] | toward nearest zone
+ *  2   | Food direction Y (tanh)       | [-1, 1] | toward nearest zone
+ *  3   | Food direction Z (tanh)       | [-1, 1] | toward nearest zone
+ *  4   | Own velocity X (tanh)         | [-1, 1] | mean across nodes
+ *  5   | Oscillator sin(phase)         | [-1, 1] | internal rhythm
+ *  6   | Oscillator cos(phase)         | [-1, 1] | internal rhythm
+ *  7   | Own velocity Z (tanh)         | [-1, 1] | mean across nodes
+ *  8   | Distance to nearest food      | [0, 1]  | tanh-normalised (scale 300)
+ *  9   | Nearest food zone energy      | [0, 1]  | zone.energy / zone.maxEnergy
+ * 10   | Wall proximity X              | [0, 1]  | 1 = touching wall, 0 = centre
+ * 11   | Wall proximity Z              | [0, 1]  | 1 = touching wall, 0 = centre
  */
-export const SENSOR_COUNT = 7;
+export const SENSOR_COUNT = 12;
+
+/** Distance at which wall-proximity sensor saturates (world units). */
+export const WALL_SENSE_RADIUS = 200;
+
+/** Distance scale for food-distance tanh normalisation (world units). */
+export const FOOD_DISTANCE_SCALE = 300;
+
 export const HIDDEN_SIZE = 10;
 
 export class Genome {

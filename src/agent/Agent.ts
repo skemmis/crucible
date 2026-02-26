@@ -1,7 +1,7 @@
 import { PhysicsNode } from '../physics/PhysicsNode';
 import { Spring } from '../physics/Spring';
 import { Vec3 } from '../physics/Vec3';
-import { Genome, SENSOR_COUNT } from './Genome';
+import { Genome, SENSOR_COUNT, WALL_SENSE_RADIUS, FOOD_DISTANCE_SCALE } from './Genome';
 import { Heightfield } from '../world/Heightfield';
 
 let nextId = 0;
@@ -12,6 +12,7 @@ export interface EnergyZone {
   z: number;
   radius: number;
   energy: number;
+  maxEnergy: number;
 }
 
 function hueFromGeneration(baseHue: number): number {
@@ -128,11 +129,24 @@ export class Agent {
 
   // ── Sensing ──────────────────────────────────────────────────────────────────
 
-  private _sense(zones: EnergyZone[]): number[] {
+  /**
+   * Build the 12-element sensor input vector.
+   * Slot layout is defined in Genome.ts — this method is the single place where
+   * world-state queries are assembled into that layout.
+   */
+  private _sense(
+    zones: EnergyZone[],
+    worldWidth: number,
+    worldDepth: number,
+  ): number[] {
     const c = this.centerPos;
 
-    // Nearest energy zone direction (XZ plane distance matters most)
-    let nearestDx = 0, nearestDy = 0, nearestDz = 0, nearestDist = 3000;
+    // ── Food sensing ─────────────────────────────────────────────────────────
+    // Single pass: find nearest zone, record direction, distance, and fill level.
+    let nearestDx = 0, nearestDy = 0, nearestDz = 0;
+    let nearestDist = 3000;
+    let nearestFill = 0;   // zone.energy / zone.maxEnergy
+
     for (const z of zones) {
       const dx = z.x - c.x;
       const dy = (z.y ?? 0) - c.y;
@@ -143,23 +157,44 @@ export class Agent {
         nearestDx = dx;
         nearestDy = dy;
         nearestDz = dz;
+        nearestFill = z.maxEnergy > 0 ? z.energy / z.maxEnergy : 0;
       }
     }
     const dirScale = 1 / (nearestDist + 1);
 
-    // Own average X-velocity
-    let velX = 0;
-    for (const n of this.nodes) velX += n.vel.x;
-    velX /= this.nodes.length;
+    // ── Own velocity ─────────────────────────────────────────────────────────
+    let velX = 0, velZ = 0;
+    for (const n of this.nodes) {
+      velX += n.vel.x;
+      velZ += n.vel.z;
+    }
+    const invN = 1 / this.nodes.length;
+    velX *= invN;
+    velZ *= invN;
 
+    // ── Wall proximity ───────────────────────────────────────────────────────
+    // Approaches 1 when within WALL_SENSE_RADIUS of the nearest X (or Z) wall,
+    // 0 when at the world centre or beyond WALL_SENSE_RADIUS from any wall.
+    const distToNearestWallX = Math.min(c.x, worldWidth - c.x);
+    const distToNearestWallZ = Math.min(c.z, worldDepth - c.z);
+    const wallProxX = Math.max(0, 1 - distToNearestWallX / WALL_SENSE_RADIUS);
+    const wallProxZ = Math.max(0, 1 - distToNearestWallZ / WALL_SENSE_RADIUS);
+
+    // ── Assemble input vector (must match SENSOR_COUNT = 12) ─────────────────
+    // Slot indices are the authoritative layout — see Genome.ts for the table.
     return [
-      Math.min(1, this.energy / 250),               // 0: energy [0,1]
-      Math.tanh(nearestDx * dirScale * 5),           // 1: food X
-      Math.tanh(nearestDy * dirScale * 5),           // 2: food Y
-      Math.tanh(nearestDz * dirScale * 5),           // 3: food Z
-      Math.tanh(velX * 10),                          // 4: own vel X
-      Math.sin(this.phase),                          // 5: oscillator sin
-      Math.cos(this.phase),                          // 6: oscillator cos
+      /* 0 */ Math.min(1, this.energy / 250),               // own energy
+      /* 1 */ Math.tanh(nearestDx * dirScale * 5),           // food dir X
+      /* 2 */ Math.tanh(nearestDy * dirScale * 5),           // food dir Y
+      /* 3 */ Math.tanh(nearestDz * dirScale * 5),           // food dir Z
+      /* 4 */ Math.tanh(velX * 10),                          // own vel X
+      /* 5 */ Math.sin(this.phase),                          // oscillator sin
+      /* 6 */ Math.cos(this.phase),                          // oscillator cos
+      /* 7 */ Math.tanh(velZ * 10),                          // own vel Z
+      /* 8 */ Math.tanh(nearestDist / FOOD_DISTANCE_SCALE),  // food distance
+      /* 9 */ nearestFill,                                   // food zone energy
+      /* 10 */ wallProxX,                                    // wall proximity X
+      /* 11 */ wallProxZ,                                    // wall proximity Z
     ];
   }
 
@@ -176,7 +211,7 @@ export class Agent {
     this.phase += dt * (2.5 + Math.sin(this.phase * 0.3) * 0.5);
 
     // Brain → muscle activations
-    const inputs = this._sense(zones);
+    const inputs = this._sense(zones, worldWidth, worldDepth);
     const outputs = this.genome.brain.forward(inputs);
     for (let i = 0; i < this.muscles.length; i++) {
       this.muscles[i].activation = outputs[i % outputs.length];
@@ -254,6 +289,6 @@ export class Agent {
   }
 }
 
-// Sanity-check sensor count constant
+// Sanity-check: _sense() return length must equal SENSOR_COUNT
 const _check: number = SENSOR_COUNT;
 void _check;
