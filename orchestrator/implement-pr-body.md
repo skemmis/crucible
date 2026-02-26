@@ -1,17 +1,18 @@
 ## Summary
-- Adds **ComplexityScore** (∈ [0,1] or `null`) to every telemetry snapshot, computed as the geometric mean of five normalised sub-scores with two hard gates (birthDeathRatio band + maxGeneration growth)
-- Logs all six sub-scores individually per snapshot so callers can diagnose *which* dimension is driving or suppressing the aggregate
-- Tracks **complexityScoreVariance** and lag-1 **complexityScoreAutocorrelation** over a rolling 10-snapshot window — a near-critical system should fluctuate, not flatline
-- Includes the active **WorldConfig** values in every telemetry snapshot, tying complexity scores to the parameters that produced them
+- Implements the consensus-agreed **local kinship signal**: a diegetic, O(n²) cooperative energy-transfer mechanic that runs each tick between spatially nearby agents
+- Adds `Genome.kinship(a, b)` — a compact, O(1) pairwise genome similarity score computed from the first 3 node genes (15 features), converted to [0,1] via exponential decay
+- Kin pairs within `KINSHIP_INTERACT_RADIUS` (120 world units) that exceed `KINSHIP_THRESHOLD` (0.25) receive proportional energy equalisation, creating kin-selection pressure without any lineage trees or global bookkeeping
+- No sensor counts, neural net sizes, or existing telemetry interfaces were changed
 
 ## Changes
-- `src/world/World.ts` — adds `ComplexitySubScores` interface; extends `TelemetrySnapshot` with `complexityScore`, `complexitySubScores`, `complexityScoreVariance`, `complexityScoreAutocorrelation`, and `config`; adds `_computeComplexitySubScores()` to World; extends `TelemetryTracker` with maxGeneration history (gate check) and score history (variance/autocorrelation); stores `config` on World instance
+- **`src/agent/Genome.ts`**: Added `static kinship(a, b): number` method with inline documentation explaining the kinship marker approach and its biological analogy
+- **`src/world/World.ts`**: Added `_applyKinshipInteractions()` private method and called it at the end of `update()` after births/deaths are resolved; added named constants (`KINSHIP_INTERACT_RADIUS`, `KINSHIP_THRESHOLD`, `KINSHIP_TRANSFER_RATE`) with explanatory comments
 
 ## Test plan
 - [ ] Run `npm run dev` and verify the simulation starts without errors
-- [ ] Open browser console, wait 60 s, observe a telemetry POST — confirm the payload includes `complexityScore`, `complexitySubScores`, `complexityScoreVariance`, `complexityScoreAutocorrelation`, and `config` fields
-- [ ] Confirm `complexityScore` is `null` early in a run (before lineages have grown and population has stabilised) and becomes a number once gates pass
-- [ ] Confirm `config` in the snapshot matches `DEFAULT_CONFIG`
-- [ ] Check browser console for runtime errors
+- [ ] Let the simulation run for several minutes; observe whether agents with similar hue (a proxy for genetic relatedness, since hue drifts slowly via `hueFromGeneration`) tend to cluster spatially over time
+- [ ] Open browser console — no runtime errors should appear from the kinship pass
+- [ ] Verify that no agent's energy goes below 0 or above 300 due to kinship transfers (the clamp guards in `_applyKinshipInteractions` should prevent this)
+- [ ] Check that population remains stable (not crashing or exploding) with the new energy-sharing mechanic active
 
-Closes #23
+Closes #24

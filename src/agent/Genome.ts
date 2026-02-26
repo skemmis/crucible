@@ -53,6 +53,17 @@ export const FOOD_DISTANCE_SCALE = 300;
 
 export const HIDDEN_SIZE = 10;
 
+/**
+ * Number of "kinship marker" nodes sampled from the start of the node list.
+ * Using only the first few nodes keeps the kinship computation cheap and
+ * stable (early nodes in the genome are unlikely to be absent due to
+ * minimum node count guarantees).
+ */
+const KINSHIP_MARKER_NODES = 3;
+
+/** Typical L2 kinship-vector distance between parent and child (empirically ~30–40). */
+const KINSHIP_SCALE = 35;
+
 export class Genome {
   constructor(
     public nodes: NodeGene[],
@@ -101,6 +112,37 @@ export class Genome {
       isActuated: Math.random() < 0.55,
       contractionRatio: 0.15 + Math.random() * 0.25,
     };
+  }
+
+  // ─── Kinship ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Compute a kinship score in [0, 1] between two genomes.
+   *
+   * Uses only the first KINSHIP_MARKER_NODES nodes (5 features each) as
+   * "kinship markers" — a compact, heritable signal analogous to a genetic
+   * fingerprint.  Distance is L2 in this marker space, converted to similarity
+   * via an exponential decay.
+   *
+   *   kinship = 1.0  → identical marker vectors (self or perfect clone)
+   *   kinship ≈ 0.37 → L2 distance = KINSHIP_SCALE (~typical parent–child gap)
+   *   kinship ≈ 0.0  → unrelated (distance >> KINSHIP_SCALE)
+   *
+   * O(KINSHIP_MARKER_NODES × 5) — effectively O(1).
+   */
+  static kinship(a: Genome, b: Genome): number {
+    const len = Math.min(KINSHIP_MARKER_NODES, a.nodes.length, b.nodes.length);
+    let distSq = 0;
+    for (let i = 0; i < len; i++) {
+      const na = a.nodes[i];
+      const nb = b.nodes[i];
+      distSq += (na.dx     - nb.dx)     ** 2;
+      distSq += (na.dy     - nb.dy)     ** 2;
+      distSq += (na.dz     - nb.dz)     ** 2;
+      distSq += (na.mass   - nb.mass)   ** 2;
+      distSq += (na.radius - nb.radius) ** 2;
+    }
+    return Math.exp(-Math.sqrt(distSq) / KINSHIP_SCALE);
   }
 
   // ─── Mutation ───────────────────────────────────────────────────────────────
