@@ -35,19 +35,39 @@ export async function callAgent(agent: AgentConfig, userPrompt: string): Promise
   }
 }
 
+// ── Claude (extended thinking via beta API) ────────────────────────────────
+// claude-3-7-sonnet supports extended thinking through the beta.messages endpoint.
+// The response contains both <thinking> blocks (internal chain-of-thought) and
+// text blocks — we discard the thinking blocks and return only the text.
+
 async function callClaude(agent: AgentConfig, userPrompt: string): Promise<string> {
   const client = anthropicClient();
-  const message = await client.messages.create({
+
+  const message = await client.beta.messages.create({
     model: agent.model,
-    max_tokens: 1024,
+    max_tokens: 16000,        // must be ≥ budget_tokens + expected output
+    thinking: {
+      type: 'enabled',
+      budget_tokens: 8000,    // up to 8k tokens of internal reasoning
+    },
     system: agent.systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
+    betas: ['interleaved-thinking-2025-05-14'],
   });
 
-  const block = message.content[0];
-  if (block.type !== 'text') throw new Error('Unexpected response type from Claude');
-  return block.text;
+  // Extended thinking responses intermix thinking blocks and text blocks.
+  // Extract only the visible text block(s).
+  const textBlock = message.content.find(block => block.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') {
+    throw new Error(`No text block in Claude response — got: ${message.content.map(b => b.type).join(', ')}`);
+  }
+  return textBlock.text;
 }
+
+// ── Gemini (reasoning via gemini-2.5-pro) ─────────────────────────────────
+// gemini-2.5-pro has built-in thinking. Setting thinkingBudget to -1 enables
+// dynamic (automatic) reasoning — the model decides how much to think based
+// on prompt complexity.
 
 async function callGemini(agent: AgentConfig, userPrompt: string): Promise<string> {
   const client = googleClient();
@@ -56,7 +76,15 @@ async function callGemini(agent: AgentConfig, userPrompt: string): Promise<strin
     systemInstruction: agent.systemPrompt,
   });
 
-  const result = await model.generateContent(userPrompt);
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+    // thinkingConfig supported in @google/generative-ai ≥0.24.0
+    // thinkingBudget: -1 = dynamic (model decides), 0 = disabled
+    generationConfig: {
+      thinkingConfig: { thinkingBudget: -1 },
+    } as any,
+  });
+
   const text = result.response.text();
   if (!text) throw new Error('Empty response from Gemini');
   return text;

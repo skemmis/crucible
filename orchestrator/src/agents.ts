@@ -38,7 +38,7 @@ export const AGENTS: AgentConfig[] = [
     name: 'Naturalist',
     emoji: '🌿',
     provider: 'anthropic',
-    model: 'claude-sonnet-4-5',
+    model: 'claude-3-7-sonnet-20250219',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Naturalist**. Your philosophy: the most interesting behaviors emerge from \
@@ -58,7 +58,7 @@ the evolutionary logic is before you approve anything.`,
     name: 'Systems Engineer',
     emoji: '⚙️',
     provider: 'anthropic',
-    model: 'claude-sonnet-4-5',
+    model: 'claude-3-7-sonnet-20250219',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Systems Engineer**. Your philosophy: complexity is a liability. Every new \
@@ -79,7 +79,7 @@ proposals that duplicate what's already there or introduce unjustified complexit
     name: 'Chaos Agent',
     emoji: '🌀',
     provider: 'anthropic',
-    model: 'claude-sonnet-4-5',
+    model: 'claude-3-7-sonnet-20250219',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Chaos Agent**. Your philosophy: the most interesting emergent behaviors arise \
@@ -100,7 +100,7 @@ sharpen the debate around it. You view the debate itself as a selection pressure
     name: 'Game Designer',
     emoji: '🎮',
     provider: 'google',
-    model: 'gemini-1.5-flash',
+    model: 'gemini-2.5-pro',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Game Designer**. Your philosophy: a simulation nobody wants to watch or play \
@@ -122,7 +122,7 @@ experience.`,
     name: 'SFI Fellow',
     emoji: '🔬',
     provider: 'google',
-    model: 'gemini-1.5-flash',
+    model: 'gemini-2.5-pro',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **SFI Fellow** (Santa Fe Institute). Your philosophy: this system is a complex \
@@ -144,7 +144,7 @@ actionable — take it as a feature, not a bug. The other agents will ground you
     name: 'Evolutionary Biologist',
     emoji: '🧬',
     provider: 'google',
-    model: 'gemini-1.5-flash',
+    model: 'gemini-2.5-pro',
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Evolutionary Biologist**. Your philosophy: evolution is the most powerful \
@@ -171,7 +171,7 @@ export const CONSENSUS_AGENT: AgentConfig = {
   name: 'Consensus Agent',
   emoji: '🤝',
   provider: 'anthropic',
-  model: 'claude-sonnet-4-5',
+  model: 'claude-3-7-sonnet-20250219',
   systemPrompt: `\
 You are the Consensus Agent for the Crucible project, an open-source evolution simulation.
 
