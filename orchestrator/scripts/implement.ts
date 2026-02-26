@@ -110,6 +110,10 @@ ${filesSection}
 Implement the consensus decision. Be surgical — touch only what's necessary. \
 Keep changes consistent with the existing code style and architecture.
 
+IMPORTANT: If the consensus describes multiple phases or steps, implement ONLY the first \
+phase/step. Do not attempt to implement everything at once. A focused, working first step \
+is far more valuable than a partial attempt at the whole feature.
+
 Output your response in EXACTLY this format:
 
 IMPLEMENTATION_START
@@ -211,13 +215,13 @@ async function main(): Promise<void> {
   // the request could exceed the 10-minute non-streaming timeout threshold.
   const stream = client.messages.stream({
     model: 'claude-sonnet-4-6',
-    max_tokens: 16000,
-    thinking: { type: 'enabled', budget_tokens: 6000 } as any,
+    max_tokens: 32000,
+    thinking: { type: 'enabled', budget_tokens: 8000 } as any,
     messages: [{ role: 'user', content: prompt }],
   });
 
   // Stream to stdout so GitHub Actions logs show live progress
-  stream.on('text', (text) => process.stdout.write(''));  // keep connection alive
+  stream.on('text', (text) => process.stdout.write(text));
   const message = await stream.finalMessage();
 
   const textBlock = message.content.find(b => b.type === 'text');
@@ -225,6 +229,9 @@ async function main(): Promise<void> {
     throw new Error('No text block in Claude response');
   }
   const responseText = textBlock.text;
+  console.log(`\n[implement] Response length: ${responseText.length} chars`);
+  console.log(`[implement] Has IMPLEMENTATION_START: ${responseText.includes('IMPLEMENTATION_START')}`);
+  console.log(`[implement] Has IMPLEMENTATION_END: ${responseText.includes('IMPLEMENTATION_END')}`);
 
   // 4. Parse
   const { files, prBody } = parseImplementation(responseText);
