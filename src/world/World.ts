@@ -147,6 +147,37 @@ const SCORE_HISTORY_LEN = 10;
 const BIRTH_DEATH_GATE_LO = 0.85;
 const BIRTH_DEATH_GATE_HI = 1.15;
 
+// ── Kinship interaction constants ─────────────────────────────────────────────
+
+/**
+ * XZ radius within which two agents can sense each other's kinship.
+ * Chosen to be roughly 2–3× a typical agent's bounding radius so that
+ * adjacent agents in the same feeding patch will interact.
+ */
+const KINSHIP_INTERACT_RADIUS = 120;
+
+/**
+ * Minimum kinship score required for cooperative energy transfer to occur.
+ * Below this threshold the two agents are too genetically distant to be
+ * considered kin — no transfer happens.
+ *
+ * At KINSHIP_SCALE = 35 (parent→child distance):
+ *   kinship ≈ 0.37 for a first-generation child
+ *   kinship ≈ 0.14 for a grandchild
+ *   threshold 0.25 ≈ ~1.4 generations of drift
+ */
+const KINSHIP_THRESHOLD = 0.25;
+
+/**
+ * Fraction of the energy difference transferred per tick.
+ * Kept small so the effect is a gentle pressure toward equalisation, not
+ * an instant levelling of energy across a kin cluster.
+ *
+ * At 60 Hz and a difference of 100 energy units:
+ *   transfer = 100 × 0.04 × kinship ≤ 4 units/tick  (bounded by kinship < 1)
+ */
+const KINSHIP_TRANSFER_RATE = 0.04;
+
 // ── Telemetry tracker (lives inside World, updated each step) ─────────────────
 
 class TelemetryTracker {
@@ -397,6 +428,66 @@ export class World {
     this.env.addCorpse(c.x, groundY, c.z, agent.energy);
   }
 
+  /**
+   * Apply local kin-selection cooperative energy transfer.
+   *
+   * For each live pair of agents within KINSHIP_INTERACT_RADIUS (XZ plane),
+   * compute their genome kinship score.  If it exceeds KINSHIP_THRESHOLD, the
+   * richer agent transfers a small fraction of the energy difference to the
+   * poorer kin — cooperative resource-sharing driven by genetic relatedness.
+   *
+   * Complexity: O(n²) in agent count, but n ≤ maxAgents (60) so the worst case
+   * is ~1 800 pairwise checks per tick — negligible vs. physics.
+   *
+   * Emergent effect: kin clusters form naturally, since offspring that stay near
+   * their parent and siblings receive an energy subsidy.  Unrelated lineages
+   * that wander into the same patch do not receive this benefit, creating
+   * implicit competitive exclusion between lineages without any explicit
+   * aggression mechanic.
+   */
+  private _applyKinshipInteractions(): void {
+    const n = this.agents.length;
+    if (n < 2) return;
+
+    const radiusSq = KINSHIP_INTERACT_RADIUS * KINSHIP_INTERACT_RADIUS;
+
+    for (let i = 0; i < n; i++) {
+      const a = this.agents[i];
+      const ca = a.centerPos;
+
+      for (let j = i + 1; j < n; j++) {
+        const b = this.agents[j];
+        const cb = b.centerPos;
+
+        // Fast XZ spatial cull — Y is usually small relative to XZ distances
+        const dx = ca.x - cb.x;
+        const dz = ca.z - cb.z;
+        if (dx * dx + dz * dz > radiusSq) continue;
+
+        // Genome kinship — O(1) (fixed small number of marker nodes)
+        const k = Genome.kinship(a.genome, b.genome);
+        if (k < KINSHIP_THRESHOLD) continue;
+
+        // Cooperative energy equalisation: richer kin gives to poorer kin.
+        // Transfer is proportional to kinship score so close relatives share
+        // more readily than distant ones.
+        const diff = a.energy - b.energy;
+        if (Math.abs(diff) < 1) continue; // no meaningful difference
+
+        const transfer = diff * k * KINSHIP_TRANSFER_RATE;
+        a.energy -= transfer;
+        b.energy += transfer;
+
+        // Clamp to legal bounds (shouldn't normally be needed, but guards
+        // against numerical edge cases with very large energy differences)
+        if (a.energy < 0) { b.energy += a.energy; a.energy = 0; }
+        if (b.energy < 0) { a.energy += b.energy; b.energy = 0; }
+        a.energy = Math.min(300, a.energy);
+        b.energy = Math.min(300, b.energy);
+      }
+    }
+  }
+
   update(dt: number): void {
     this.time += dt;
     this.stepCount++;
@@ -464,6 +555,10 @@ export class World {
         this._spawn(Genome.random());
       }
     }
+
+    // Kinship interactions: kin-selection cooperative energy transfer.
+    // Runs after all births/deaths are resolved so the live agent list is stable.
+    this._applyKinshipInteractions();
 
     // Update rolling diversity history every frame (cheap: O(nk))
     const diversity = this._computeGenomeDiversity();
