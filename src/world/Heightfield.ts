@@ -1,4 +1,3 @@
-<full new content of the file>
 /**
  * Static procedural heightfield, baked once at world-generation time.
  *

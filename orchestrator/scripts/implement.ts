@@ -165,9 +165,12 @@ function parseImplementation(response: string): ParsedImplementation {
       const newline = chunk.indexOf('\n');
       if (newline === -1) continue;
       const filePath = chunk.slice(0, newline).trim();
-      // Strip markdown code fences that LLMs sometimes wrap content in
+      // Strip artefacts LLMs sometimes add:
+      // 1. Markdown code fences (```typescript ... ```)
+      // 2. Literal template placeholder echoed from the prompt
       let fileContent = chunk.slice(newline + 1);
       fileContent = fileContent.replace(/^```[^\n]*\n/, '').replace(/\n```\s*$/, '');
+      fileContent = fileContent.replace(/^<full new content of the file>\n/, '');
       if (filePath) files.set(filePath, fileContent);
     }
   }

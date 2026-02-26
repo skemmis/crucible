@@ -1,4 +1,3 @@
-<full new content of the file>
 import { PhysicsNode } from '../physics/PhysicsNode';
 import { Spring } from '../physics/Spring';
 import { Vec3 } from '../physics/Vec3';

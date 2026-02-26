@@ -1,4 +1,3 @@
-<full new content of the file>
 import { Agent } from '../agent/Agent';
 import { Genome } from '../agent/Genome';
 import { Environment } from './Environment';

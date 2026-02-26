@@ -1,4 +1,3 @@
-<full new content of the file>
 import { Vec3 } from './Vec3';
 
 /**
