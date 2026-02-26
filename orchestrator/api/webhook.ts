@@ -76,10 +76,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  // Acknowledge immediately — GitHub expects 200 within 10s
-  res.status(200).send('OK');
-
   // ── Route events ──────────────────────────────────────────────────────
+  // Process synchronously before responding — Vercel may freeze execution
+  // after res.send(). With maxDuration:60 and parallel LLM calls (~10–15s)
+  // we're well within limits.
 
   try {
     if (eventType === 'issues' && payload.action === 'opened') {
@@ -126,5 +126,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
   } catch (err) {
     console.error('[webhook] Error handling event:', err);
+    res.status(500).send('Internal Server Error');
+    return;
   }
+
+  // Respond after processing is complete
+  res.status(200).send('OK');
 }
