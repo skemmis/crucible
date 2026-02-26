@@ -27,6 +27,30 @@ export const DEFAULT_CONFIG: WorldConfig = {
 
 // ── Telemetry types ────────────────────────────────────────────────────────────
 
+/**
+ * Individual sub-scores that feed into ComplexityScore.
+ * Always logged even when gates fail, so callers can diagnose which
+ * dimension is holding back the aggregate.
+ */
+export interface ComplexitySubScores {
+  /** High diversity sustained over time (genomeDiversity high, |diversityDelta| low). [0,1] */
+  diversityScore: number;
+  /** birthDeathRatio near 1 — bell curve centred at 1.0. [0,1] */
+  stabilityScore: number;
+  /** Agents spread across the world (spatialEntropy / log2(16×16)). [0,1] */
+  spatialScore: number;
+  /** High variance in energy acquisition — different strategies succeeding. [0,1] */
+  varianceScore: number;
+  /** Lineages persisting — maxGeneration still growing. [0,1] */
+  generationScore: number;
+  /** True if both hard gates (birthDeathRatio band + maxGeneration growth) passed. */
+  gatesPassed: boolean;
+  /** Hard gate: birthDeathRatio ∈ [0.85, 1.15]. */
+  gateBirthDeath: boolean;
+  /** Hard gate: maxGeneration has increased over the last 10 snapshots (~10 min). */
+  gateGenerationGrowth: boolean;
+}
+
 export interface TelemetrySnapshot {
   timestamp: number;        // wall-clock ms
   simTime: number;          // simulation seconds
@@ -54,6 +78,23 @@ export interface TelemetrySnapshot {
   // Tracks whether crowding causes convergence (collapse) or divergence (niche carving)
   morphologicalVarianceByGeneration: GenerationVarianceBucket[];
 
+  // ── Complexity score ────────────────────────────────────────────────────────
+  // null when either hard gate fails (birthDeathRatio out of band or lineages stalling).
+  // Null is reported explicitly — a misleading zero would be worse than no value.
+  complexityScore: number | null;
+  /** All six sub-scores, always present regardless of gate status. */
+  complexitySubScores: ComplexitySubScores;
+  /**
+   * Variance of the last ≤10 non-null complexityScore values.
+   * A near-critical system should *fluctuate*; a flatline at 0.7 is boring.
+   */
+  complexityScoreVariance: number;
+  /**
+   * Lag-1 autocorrelation of the last ≤10 non-null complexityScore values.
+   * High positive → score is trending; near zero → irregular fluctuation.
+   */
+  complexityScoreAutocorrelation: number;
+
   // Population basics
   agentCount: number;
   meanEnergy: number;
@@ -61,6 +102,9 @@ export interface TelemetrySnapshot {
 
   // Anomaly flags — fires when a metric deviates beyond threshold from baseline
   anomalies: AnomalyFlag[];
+
+  // Active config values — ties every snapshot to the parameters that produced it
+  config: WorldConfig;
 
   // Optional low-res canvas snapshot — only populated when anomaly fires
   canvasSnapshot?: string;
@@ -90,6 +134,18 @@ const DIVERSITY_HISTORY_LEN = 20;
 const ANOMALY_SIGMA = 2.0;
 // Spatial grid resolution
 const GRID_SIZE = 16;
+// Max log2 of GRID_SIZE × GRID_SIZE — used to normalise spatialEntropy to [0,1]
+const MAX_SPATIAL_ENTROPY = Math.log2(GRID_SIZE * GRID_SIZE); // 8.0
+
+// Number of snapshots to retain for maxGeneration gate check (~10 minutes at 60 s/snapshot)
+const MAX_GEN_HISTORY_LEN = 10;
+
+// Number of complexity score values to retain for variance / autocorrelation
+const SCORE_HISTORY_LEN = 10;
+
+// Hard gates for ComplexityScore
+const BIRTH_DEATH_GATE_LO = 0.85;
+const BIRTH_DEATH_GATE_HI = 1.15;
 
 // ── Telemetry tracker (lives inside World, updated each step) ─────────────────
 
@@ -110,6 +166,12 @@ class TelemetryTracker {
 
   // Last snapshot's diversity value for rate-of-change
   private _lastSnapshotDiversity: number | null = null;
+
+  // Rolling history of maxGeneration at each snapshot — for the gate check
+  private _maxGenHistory: number[] = [];
+
+  // Rolling history of non-null complexity scores — for variance / autocorrelation
+  private _scoreHistory: number[] = [];
 
   recordBirth(): void {
     this._birthTotal -= this._birthCounts[this._windowIdx];
@@ -159,6 +221,80 @@ class TelemetryTracker {
     this._lastSnapshotDiversity = value;
   }
 
+  /**
+   * Record maxGeneration at snapshot time.
+   * Returns true if maxGeneration has strictly increased over the retention window
+   * (i.e. at least one value in the history is lower than the current value).
+   */
+  recordMaxGeneration(value: number): boolean {
+    this._maxGenHistory.push(value);
+    if (this._maxGenHistory.length > MAX_GEN_HISTORY_LEN) {
+      this._maxGenHistory.shift();
+    }
+    if (this._maxGenHistory.length < 2) return true; // not enough data — give benefit of doubt
+    const earliest = this._maxGenHistory[0];
+    return value > earliest;
+  }
+
+  /**
+   * Record a non-null complexity score.
+   * Returns { variance, autocorrelation } over the rolling window.
+   */
+  recordComplexityScore(score: number): { variance: number; autocorrelation: number } {
+    this._scoreHistory.push(score);
+    if (this._scoreHistory.length > SCORE_HISTORY_LEN) {
+      this._scoreHistory.shift();
+    }
+    return {
+      variance: this._computeScoreVariance(),
+      autocorrelation: this._computeScoreAutocorrelation(),
+    };
+  }
+
+  /**
+   * Returns the latest variance / autocorrelation values (for null-score snapshots
+   * where we still want to report the rolling stats from prior snapshots).
+   */
+  getScoreStats(): { variance: number; autocorrelation: number } {
+    return {
+      variance: this._computeScoreVariance(),
+      autocorrelation: this._computeScoreAutocorrelation(),
+    };
+  }
+
+  private _computeScoreVariance(): number {
+    const h = this._scoreHistory;
+    const n = h.length;
+    if (n < 2) return 0;
+    const mean = h.reduce((s, v) => s + v, 0) / n;
+    return h.reduce((s, v) => s + (v - mean) ** 2, 0) / n;
+  }
+
+  private _computeScoreAutocorrelation(): number {
+    // Lag-1 Pearson correlation between h[0..n-2] and h[1..n-1]
+    const h = this._scoreHistory;
+    const n = h.length;
+    if (n < 3) return 0;
+
+    const x = h.slice(0, n - 1);
+    const y = h.slice(1, n);
+    const m = x.length;
+
+    const meanX = x.reduce((s, v) => s + v, 0) / m;
+    const meanY = y.reduce((s, v) => s + v, 0) / m;
+
+    let num = 0, varX = 0, varY = 0;
+    for (let i = 0; i < m; i++) {
+      const dx = x[i] - meanX;
+      const dy = y[i] - meanY;
+      num += dx * dy;
+      varX += dx * dx;
+      varY += dy * dy;
+    }
+    const denom = Math.sqrt(varX * varY);
+    return denom < 1e-9 ? 0 : num / denom;
+  }
+
   checkAnomaly(metric: string, value: number): AnomalyFlag | null {
     if (!this._baseline.has(metric)) {
       this._baseline.set(metric, { values: [], mean: value, stddev: 0 });
@@ -199,6 +335,9 @@ export class World {
   readonly worldDepth: number;
   readonly maxAgents: number;
 
+  /** Active configuration — stored so it can be included in every snapshot. */
+  readonly config: WorldConfig;
+
   // Phylogeny log: [childId, parentId, generation, birthTime]
   lineageLog: Array<[number, number | null, number, number]> = [];
 
@@ -209,6 +348,7 @@ export class World {
   private _frameEnergyGained: Map<number, number> = new Map();
 
   constructor(cfg: WorldConfig) {
+    this.config = cfg;
     this.worldWidth = cfg.worldWidth;
     this.worldDepth = cfg.worldDepth;
     this.maxAgents = cfg.maxAgents;
@@ -370,6 +510,56 @@ export class World {
     for (const a of this.agents) variance += (a.energy - meanEnergy) ** 2;
     const stddevEnergy = n > 1 ? Math.sqrt(variance / n) : 0;
 
+    // ── maxGeneration (needed for both stats and complexity gates) ─────────────
+    const gens = this.agents.map(a => a.generation);
+    const maxGeneration = gens.length ? Math.max(...gens) : 0;
+
+    // ── Complexity score ───────────────────────────────────────────────────────
+    const maxGenGrowing = this.telemetry.recordMaxGeneration(maxGeneration);
+    const birthDeathInBand =
+      birthDeathRatio >= BIRTH_DEATH_GATE_LO &&
+      birthDeathRatio <= BIRTH_DEATH_GATE_HI;
+
+    const subScores = this._computeComplexitySubScores(
+      genomeDiversity,
+      diversityDelta,
+      birthDeathRatio,
+      spatialEntropy,
+      energyAcquisitionVariance,
+      maxGeneration,
+      birthDeathInBand,
+      maxGenGrowing,
+    );
+
+    let complexityScore: number | null = null;
+    let complexityScoreVariance = 0;
+    let complexityScoreAutocorrelation = 0;
+
+    if (subScores.gatesPassed) {
+      const { diversityScore, stabilityScore, spatialScore, varianceScore, generationScore } = subScores;
+      // Geometric mean — clamp sub-scores away from absolute zero to avoid
+      // catastrophic collapse from a single near-zero sub-score.
+      // The consensus agreed zeros are "information" but we also log sub-scores
+      // individually, so we use a soft floor of 0.001 here.
+      const FLOOR = 0.001;
+      const product =
+        Math.max(FLOOR, diversityScore) *
+        Math.max(FLOOR, stabilityScore) *
+        Math.max(FLOOR, spatialScore) *
+        Math.max(FLOOR, varianceScore) *
+        Math.max(FLOOR, generationScore);
+      complexityScore = Math.pow(product, 1 / 5);
+
+      const stats = this.telemetry.recordComplexityScore(complexityScore);
+      complexityScoreVariance = stats.variance;
+      complexityScoreAutocorrelation = stats.autocorrelation;
+    } else {
+      // Gates failed — retrieve stats from prior non-null scores (if any)
+      const stats = this.telemetry.getScoreStats();
+      complexityScoreVariance = stats.variance;
+      complexityScoreAutocorrelation = stats.autocorrelation;
+    }
+
     // ── Anomaly detection ─────────────────────────────────────────────────────
     const anomalies: AnomalyFlag[] = [];
     const checks: Array<[string, number]> = [
@@ -380,6 +570,9 @@ export class World {
       ['diversityDelta', Math.abs(diversityDelta)],
       ['energyAcquisitionVariance', energyAcquisitionVariance],
     ];
+    if (complexityScore !== null) {
+      checks.push(['complexityScore', complexityScore]);
+    }
     for (const [metric, value] of checks) {
       const flag = this.telemetry.checkAnomaly(metric, value);
       if (flag) anomalies.push(flag);
@@ -397,13 +590,77 @@ export class World {
       spatialEntropy,
       energyAcquisitionVariance,
       morphologicalVarianceByGeneration,
+      complexityScore,
+      complexitySubScores: subScores,
+      complexityScoreVariance,
+      complexityScoreAutocorrelation,
       agentCount: n,
       meanEnergy,
       stddevEnergy,
       anomalies,
+      config: { ...this.config },
       canvasSnapshot: canvasDataUrl,
     };
   }
+
+  // ── Complexity sub-scores ─────────────────────────────────────────────────────
+
+  /**
+   * Compute normalised [0,1] sub-scores from existing telemetry values.
+   * No new data collection — purely arithmetic on already-computed metrics.
+   */
+  private _computeComplexitySubScores(
+    genomeDiversity: number,
+    diversityDelta: number,
+    birthDeathRatio: number,
+    spatialEntropy: number,
+    energyAcquisitionVariance: number,
+    maxGeneration: number,
+    birthDeathInBand: boolean,
+    maxGenGrowing: boolean,
+  ): ComplexitySubScores {
+    const gatesPassed = birthDeathInBand && maxGenGrowing;
+
+    // ── diversityScore ────────────────────────────────────────────────────────
+    // High diversity that is *sustained* (not converging or exploding).
+    // genomeDiversity is in world-units (L2 of morphological feature vectors).
+    // Typical meaningful range: 0 – 150. We want high values, but also penalise
+    // large absolute rate-of-change (system in flux rather than sustaining).
+    const diversityMagnitude = 1 - Math.exp(-genomeDiversity / 50);  // [0,1], saturates ~150
+    const deltaStability = Math.exp(-Math.abs(diversityDelta) / 8);  // 1=flat, decays with delta
+    const diversityScore = diversityMagnitude * deltaStability;
+
+    // ── stabilityScore ────────────────────────────────────────────────────────
+    // Gaussian bell centred at birthDeathRatio = 1.0.
+    // Width chosen so the score is ~0.5 at the gate edges (0.85 / 1.15).
+    const stabilityScore = Math.exp(-((birthDeathRatio - 1.0) / 0.2) ** 2);
+
+    // ── spatialScore ──────────────────────────────────────────────────────────
+    // Shannon entropy normalised by theoretical maximum (log2(GRID_SIZE²)).
+    const spatialScore = Math.min(1, spatialEntropy / MAX_SPATIAL_ENTROPY);
+
+    // ── varianceScore ─────────────────────────────────────────────────────────
+    // energyAcquisitionVariance is in (energy units)², typical range 0–500.
+    // tanh normalisation with scale 100 → half-score at variance ≈ 100.
+    const varianceScore = Math.tanh(energyAcquisitionVariance / 100);
+
+    // ── generationScore ───────────────────────────────────────────────────────
+    // Lineages persisting across time. Saturates around generation 30.
+    const generationScore = Math.tanh(maxGeneration / 15);
+
+    return {
+      diversityScore,
+      stabilityScore,
+      spatialScore,
+      varianceScore,
+      generationScore,
+      gatesPassed,
+      gateBirthDeath: birthDeathInBand,
+      gateGenerationGrowth: maxGenGrowing,
+    };
+  }
+
+  // ── Existing private metrics ──────────────────────────────────────────────────
 
   private _computeGenomeDiversity(): number {
     const n = this.agents.length;
