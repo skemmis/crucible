@@ -1,4 +1,6 @@
 {
+  "buildCommand": null,
+  "outputDirectory": null,
   "functions": {
     "api/webhook.ts": {
       "maxDuration": 60
