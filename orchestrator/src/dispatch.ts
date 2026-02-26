@@ -108,20 +108,30 @@ async function postAgentResponses(
  * All six agents weigh in; label transitions proposed → debating.
  */
 export async function handleNewProposal(issue: GitHubIssue): Promise<void> {
-  // Idempotency guard — fetch *current* labels from GitHub (not the stale
-  // webhook payload) in case this event was redelivered after agents already ran
+  // Use the label transition as a distributed lock — do it FIRST before calling
+  // any agents. If the `proposed` label is already gone (another request beat us
+  // here), removeLabel returns silently and addLabel will just be a no-op on
+  // `debating`. We detect this by re-checking after the transition attempt.
+  await transitionLabel(issue.number, 'proposed', 'debating');
+
+  // Confirm we actually own this run — re-fetch current labels
   const freshIssue = await getIssue(issue.number);
   const currentLabels = freshIssue.labels.map(l => l.name);
-  if (currentLabels.includes('debating')) {
-    console.log(`[dispatch] Issue #${issue.number} already debating — skipping`);
+  if (!currentLabels.includes('debating')) {
+    console.log(`[dispatch] Issue #${issue.number} — transition failed, skipping`);
+    return;
+  }
+
+  // Guard against duplicate runs: if there are already agent comments, skip
+  const existingComments = await getIssueComments(issue.number);
+  if (existingComments.length > 0) {
+    console.log(`[dispatch] Issue #${issue.number} already has ${existingComments.length} comments — skipping`);
     return;
   }
 
   console.log(`[dispatch] New proposal: #${issue.number} "${issue.title}"`);
-
   const prompt = buildProposalPrompt(issue);
   await postAgentResponses(issue.number, prompt);
-  await transitionLabel(issue.number, 'proposed', 'debating');
 }
 
 /**

@@ -1,11 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { AgentConfig } from './agents';
 
 // ── Client singletons ──────────────────────────────────────────────────────
 
 let _anthropic: Anthropic | null = null;
-let _google: GoogleGenAI | null = null;
+let _google: GoogleGenerativeAI | null = null;
 
 function anthropicClient(): Anthropic {
   if (!_anthropic) {
@@ -16,21 +16,17 @@ function anthropicClient(): Anthropic {
   return _anthropic;
 }
 
-function googleClient(): GoogleGenAI {
+function googleClient(): GoogleGenerativeAI {
   if (!_google) {
     const apiKey = process.env.GOOGLE_API_KEY;
     if (!apiKey) throw new Error('GOOGLE_API_KEY is not set');
-    _google = new GoogleGenAI({ apiKey });
+    _google = new GoogleGenerativeAI(apiKey);
   }
   return _google;
 }
 
 // ── Core call ──────────────────────────────────────────────────────────────
 
-/**
- * Call an agent's underlying LLM with a user prompt.
- * Returns the text response.
- */
 export async function callAgent(agent: AgentConfig, userPrompt: string): Promise<string> {
   if (agent.provider === 'anthropic') {
     return callClaude(agent, userPrompt);
@@ -55,13 +51,13 @@ async function callClaude(agent: AgentConfig, userPrompt: string): Promise<strin
 
 async function callGemini(agent: AgentConfig, userPrompt: string): Promise<string> {
   const client = googleClient();
-  const response = await client.models.generateContent({
+  const model = client.getGenerativeModel({
     model: agent.model,
-    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-    config: { systemInstruction: agent.systemPrompt },
+    systemInstruction: agent.systemPrompt,
   });
 
-  const text = response.text;
+  const result = await model.generateContent(userPrompt);
+  const text = result.response.text();
   if (!text) throw new Error('Empty response from Gemini');
   return text;
 }
