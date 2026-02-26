@@ -1,0 +1,116 @@
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import crypto from 'crypto';
+import {
+  handleNewProposal,
+  handleFollowUp,
+  handleConsensus,
+  isHumanComment,
+} from '../src/dispatch';
+import { getIssue, getIssueComments } from '../src/github';
+
+// ── Webhook signature verification ────────────────────────────────────────
+
+function verifySignature(rawBody: string, signature: string | undefined): boolean {
+  const secret = process.env.GITHUB_WEBHOOK_SECRET;
+  if (!secret || !signature) return false;
+  const expected =
+    'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+// ── Raw body buffering ────────────────────────────────────────────────────
+
+function getRawBody(req: VercelRequest): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', chunk => (data += chunk));
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
+// ── Main handler ──────────────────────────────────────────────────────────
+
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
+  // Only accept POSTs
+  if (req.method !== 'POST') {
+    res.status(405).send('Method Not Allowed');
+    return;
+  }
+
+  // Buffer raw body (needed for HMAC verification)
+  const rawBody = await getRawBody(req);
+
+  // Verify webhook signature
+  const signature = req.headers['x-hub-signature-256'] as string | undefined;
+  if (!verifySignature(rawBody, signature)) {
+    console.warn('[webhook] Invalid signature — rejecting request');
+    res.status(401).send('Unauthorized');
+    return;
+  }
+
+  const eventType = req.headers['x-github-event'] as string;
+  let payload: any;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    res.status(400).send('Invalid JSON');
+    return;
+  }
+
+  // Acknowledge immediately — GitHub expects 200 within 10s
+  res.status(200).send('OK');
+
+  // ── Route events ──────────────────────────────────────────────────────
+
+  try {
+    if (eventType === 'issues' && payload.action === 'opened') {
+      const issue = payload.issue;
+      const labels: string[] = issue.labels.map((l: any) => l.name);
+
+      // Only trigger on issues labelled `proposed`
+      if (labels.includes('proposed')) {
+        await handleNewProposal(issue);
+      }
+    }
+
+    else if (eventType === 'issues' && payload.action === 'labeled') {
+      const issue = payload.issue;
+      const addedLabel: string = payload.label.name;
+
+      // Handle case where `proposed` label is added after issue creation
+      if (addedLabel === 'proposed') {
+        const currentLabels: string[] = issue.labels.map((l: any) => l.name);
+        // Only fire if not already debating (idempotency guard)
+        if (!currentLabels.includes('debating')) {
+          await handleNewProposal(issue);
+        }
+      }
+    }
+
+    else if (eventType === 'issue_comment' && payload.action === 'created') {
+      const issue = payload.issue;
+      const comment = payload.comment;
+      const labels: string[] = issue.labels.map((l: any) => l.name);
+
+      // Only follow up on issues that are actively debating
+      if (!labels.includes('debating')) return;
+
+      // Don't respond to bot comments (including our own)
+      if (!isHumanComment(comment.user.login)) return;
+
+      const [freshIssue, comments] = await Promise.all([
+        getIssue(issue.number),
+        getIssueComments(issue.number),
+      ]);
+
+      await handleFollowUp(freshIssue, comments);
+    }
+  } catch (err) {
+    console.error('[webhook] Error handling event:', err);
+  }
+}

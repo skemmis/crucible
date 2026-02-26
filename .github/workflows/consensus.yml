@@ -1,0 +1,38 @@
+name: Consensus Agent
+
+on:
+  schedule:
+    # Run every 6 hours — catches issues that crossed the 48hr window
+    - cron: '0 */6 * * *'
+  # Also allow manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  run-consensus:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write   # needed to post comments and update labels
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: orchestrator/package-lock.json
+
+      - name: Install dependencies
+        working-directory: orchestrator
+        run: npm ci
+
+      - name: Run consensus check
+        working-directory: orchestrator
+        env:
+          GITHUB_TOKEN: ${{ secrets.CRUCIBLE_GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: npx tsx scripts/run-consensus.ts
