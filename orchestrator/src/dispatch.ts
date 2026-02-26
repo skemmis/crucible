@@ -144,15 +144,16 @@ function delay(ms: number): Promise<void> {
  * so the thread reads as a natural conversation rather than a wall of
  * simultaneous comments.
  *
- * @param lateGuardHeader - if set, skip posting if any comment already starts with this header
- *   (used to prevent duplicate PM posts across concurrent webhook events)
+ * @param skipLateGuard - if true, skip the late idempotency guard (Round 2 uses
+ *   its own top-level guards in handleRound2 instead)
+ * @returns true if agents were posted, false if the late guard fired and posting was skipped
  */
 async function postAgentResponses(
   issueNumber: number,
   prompt: string,
   agentSubset = AGENTS,
-  lateGuardHeader?: string,
-): Promise<void> {
+  skipLateGuard = false,
+): Promise<boolean> {
   console.log(`[dispatch] Calling ${agentSubset.length} agents for issue #${issueNumber}…`);
 
   // Call all LLMs in parallel — faster than serial
@@ -160,18 +161,17 @@ async function postAgentResponses(
     agentSubset.map(agent => callAgent(agent, prompt).then(text => ({ agent, text }))),
   );
 
-  // Late idempotency guard: re-check comment count AFTER LLM calls return but
-  // BEFORE posting. Parallel webhook invocations all reach here with 0 comments,
-  // but by the time the slowest one finishes, the faster one has started posting.
-  const lateComments = await getIssueComments(issueNumber);
-  const guardHeader = lateGuardHeader ?? AGENT_HEADERS[0];
-  const agentAlreadyPosted = lateGuardHeader
-    ? lateComments.some(c => c.body.trimStart().startsWith(lateGuardHeader))
-    : lateComments.some(c => isAgentComment(c.body));
-
-  if (agentAlreadyPosted) {
-    console.log(`[dispatch] Issue #${issueNumber} — late guard triggered, skipping`);
-    return;
+  if (!skipLateGuard) {
+    // Late idempotency guard: re-check for agent comments AFTER LLM calls return
+    // but BEFORE posting. Parallel webhook invocations all reach here with 0
+    // comments, but by the time the slowest one finishes, the faster one may have
+    // already started posting. Only applies to Round 1 — Round 2 has its own
+    // idempotency guards at the top of handleRound2().
+    const lateComments = await getIssueComments(issueNumber);
+    if (lateComments.some(c => isAgentComment(c.body))) {
+      console.log(`[dispatch] Issue #${issueNumber} — late guard triggered, skipping`);
+      return false;
+    }
   }
 
   // Post responses with a small stagger so GitHub shows them sequentially
@@ -186,6 +186,8 @@ async function postAgentResponses(
     await postComment(issueNumber, result.value.text);
     if (i < results.length - 1) await delay(800); // 0.8s between posts
   }
+
+  return true;
 }
 
 // ── Event handlers ────────────────────────────────────────────────────────
@@ -221,7 +223,11 @@ export async function handleNewProposal(issue: GitHubIssue): Promise<void> {
 
   // ── Round 1: all six agents respond ──────────────────────────────────────
   const round1Prompt = buildProposalPrompt(issue);
-  await postAgentResponses(issue.number, round1Prompt);
+  const round1Posted = await postAgentResponses(issue.number, round1Prompt);
+  if (!round1Posted) {
+    console.log(`[dispatch] Issue #${issue.number} — Round 1 agents already posted, skipping PM synthesis`);
+    return;
+  }
 
   // ── PM synthesis: frame Round 2 question ─────────────────────────────────
   // Re-fetch comments to include what was just posted
@@ -263,9 +269,18 @@ export async function handleRound2(issue: GitHubIssue): Promise<void> {
   console.log(`[dispatch] Round 2 starting for issue #${issue.number}`);
 
   // ── Round 2: all six agents respond seeing the full thread ────────────────
+  // skipLateGuard=true because Round 1 agents already exist — the late guard
+  // would incorrectly trigger. handleRound2's top-level guards (label + PM count)
+  // are the idempotency mechanism for Round 2.
   const allComments = await getIssueComments(issue.number);
   const round2Prompt = buildRound2AgentPrompt(issue, allComments);
-  await postAgentResponses(issue.number, round2Prompt, AGENTS, `**${AGENTS[0].emoji} ${AGENTS[0].name}**`);
+  const agentsPosted = await postAgentResponses(issue.number, round2Prompt, AGENTS, true);
+
+  if (!agentsPosted) {
+    // Shouldn't happen (handleRound2 guards prevent duplicate runs), but be safe
+    console.log(`[dispatch] Issue #${issue.number} — Round 2 agents skipped, aborting PM verdict`);
+    return;
+  }
 
   // ── PM Round 2 synthesis: call preliminary verdict ────────────────────────
   const fullComments = await getIssueComments(issue.number);
@@ -294,7 +309,7 @@ export async function handleFollowUp(
   const respondents = [AGENTS[offset], AGENTS[(offset + 3) % AGENTS.length]];
 
   const prompt = buildFollowUpPrompt(issue, comments);
-  await postAgentResponses(issue.number, prompt, respondents);
+  await postAgentResponses(issue.number, prompt, respondents, true); // follow-ups have no strict guard
 }
 
 /**
