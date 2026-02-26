@@ -1,3 +1,4 @@
+```typescript
 import { Agent } from '../agent/Agent';
 import { Genome } from '../agent/Genome';
 import { Environment } from './Environment';
@@ -18,6 +19,152 @@ export const DEFAULT_CONFIG: WorldConfig = {
   zoneCount: 12,   // 2-D food landscape on XZ plane
 };
 
+// ── Telemetry types ────────────────────────────────────────────────────────────
+
+export interface TelemetrySnapshot {
+  timestamp: number;        // wall-clock ms
+  simTime: number;          // simulation seconds
+  stepCount: number;
+
+  // Metric 1: genome diversity — mean L2 distance from rolling centroid (O(nk))
+  genomeDiversity: number;
+
+  // Metric 2: birth/death ratio trend over last 500 frames
+  birthRate: number;        // births per 100 frames in window
+  deathRate: number;        // deaths per 100 frames in window
+  birthDeathRatio: number;
+
+  // Metric 3: diversity rate of change (first derivative vs. last snapshot)
+  diversityDelta: number;
+
+  // Metric 4: spatial entropy of agent positions in a 16×16 grid
+  spatialEntropy: number;
+
+  // Population basics
+  agentCount: number;
+  meanEnergy: number;
+  stddevEnergy: number;
+
+  // Anomaly flags — fires when a metric deviates beyond threshold from baseline
+  anomalies: AnomalyFlag[];
+
+  // Optional low-res canvas snapshot — only populated when anomaly fires
+  canvasSnapshot?: string;
+}
+
+export interface AnomalyFlag {
+  metric: string;
+  description: string;
+  value: number;
+  baseline: number;
+  sigmas: number;
+}
+
+// Rolling window size for birth/death tracking
+const BIRTH_DEATH_WINDOW = 500;
+// Number of past diversity values to keep for baseline / rate-of-change
+const DIVERSITY_HISTORY_LEN = 20;
+// Anomaly threshold in standard deviations
+const ANOMALY_SIGMA = 2.0;
+// Spatial grid resolution
+const GRID_SIZE = 16;
+
+// ── Telemetry tracker (lives inside World, updated each step) ─────────────────
+
+class TelemetryTracker {
+  // Birth/death ring buffers (1 = event in that frame, 0 = none)
+  private _birthCounts: number[] = new Array(BIRTH_DEATH_WINDOW).fill(0);
+  private _deathCounts: number[] = new Array(BIRTH_DEATH_WINDOW).fill(0);
+  private _windowIdx = 0;
+
+  private _birthTotal = 0;
+  private _deathTotal = 0;
+
+  // Rolling diversity history
+  private _diversityHistory: number[] = [];
+
+  // Rolling baseline for anomaly detection per metric
+  private _baseline: Map<string, { values: number[]; mean: number; stddev: number }> = new Map();
+
+  // Last snapshot's diversity value for rate-of-change
+  private _lastSnapshotDiversity: number | null = null;
+
+  recordBirth(): void {
+    this._birthTotal -= this._birthCounts[this._windowIdx];
+    this._birthCounts[this._windowIdx] = (this._birthCounts[this._windowIdx] ?? 0) + 1;
+    this._birthTotal += 1;
+  }
+
+  recordDeath(): void {
+    this._deathTotal -= this._deathCounts[this._windowIdx];
+    this._deathCounts[this._windowIdx] = (this._deathCounts[this._windowIdx] ?? 0) + 1;
+    this._deathTotal += 1;
+  }
+
+  advanceFrame(): void {
+    this._windowIdx = (this._windowIdx + 1) % BIRTH_DEATH_WINDOW;
+    // Clear the slot we're about to overwrite
+    this._birthTotal -= this._birthCounts[this._windowIdx];
+    this._birthCounts[this._windowIdx] = 0;
+    this._deathTotal -= this._deathCounts[this._windowIdx];
+    this._deathCounts[this._windowIdx] = 0;
+  }
+
+  get birthRate(): number {
+    return (this._birthTotal / BIRTH_DEATH_WINDOW) * 100;
+  }
+
+  get deathRate(): number {
+    return (this._deathTotal / BIRTH_DEATH_WINDOW) * 100;
+  }
+
+  recordDiversity(value: number): void {
+    this._diversityHistory.push(value);
+    if (this._diversityHistory.length > DIVERSITY_HISTORY_LEN) {
+      this._diversityHistory.shift();
+    }
+  }
+
+  get diversityDeltaSinceLastSnapshot(): number {
+    const current = this._diversityHistory[this._diversityHistory.length - 1] ?? 0;
+    if (this._lastSnapshotDiversity === null) return 0;
+    const delta = current - this._lastSnapshotDiversity;
+    this._lastSnapshotDiversity = current;
+    return delta;
+  }
+
+  markSnapshotDiversity(value: number): void {
+    this._lastSnapshotDiversity = value;
+  }
+
+  checkAnomaly(metric: string, value: number): AnomalyFlag | null {
+    if (!this._baseline.has(metric)) {
+      this._baseline.set(metric, { values: [], mean: value, stddev: 0 });
+    }
+    const b = this._baseline.get(metric)!;
+    b.values.push(value);
+    if (b.values.length > 50) b.values.shift(); // rolling 50-sample baseline
+
+    const n = b.values.length;
+    if (n < 5) return null; // not enough data yet
+
+    const mean = b.values.reduce((s, v) => s + v, 0) / n;
+    const variance = b.values.reduce((s, v) => s + (v - mean) ** 2, 0) / n;
+    const stddev = Math.sqrt(variance);
+    b.mean = mean;
+    b.stddev = stddev;
+
+    if (stddev < 1e-9) return null;
+    const sigmas = Math.abs(value - mean) / stddev;
+    if (sigmas >= ANOMALY_SIGMA) {
+      return { metric, description: `${metric} deviated ${sigmas.toFixed(1)}σ from baseline`, value, baseline: mean, sigmas };
+    }
+    return null;
+  }
+}
+
+// ── World ─────────────────────────────────────────────────────────────────────
+
 export class World {
   agents: Agent[] = [];
   env: Environment;
@@ -30,6 +177,8 @@ export class World {
 
   // Phylogeny log: [childId, parentId, generation, birthTime]
   lineageLog: Array<[number, number | null, number, number]> = [];
+
+  readonly telemetry: TelemetryTracker = new TelemetryTracker();
 
   constructor(cfg: WorldConfig) {
     this.worldWidth = cfg.worldWidth;
@@ -62,6 +211,7 @@ export class World {
   update(dt: number): void {
     this.time += dt;
     this.stepCount++;
+    this.telemetry.advanceFrame();
     this.env.update(dt);
 
     const offspring: Agent[] = [];
@@ -72,10 +222,19 @@ export class World {
       if (agent.dead) continue;
 
       // Max lifespan: forces generational turnover
-      if (agent.age > 180) { agent.dead = true; liveCount--; continue; }
+      if (agent.age > 180) {
+        agent.dead = true;
+        liveCount--;
+        this.telemetry.recordDeath();
+        continue;
+      }
 
       agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth);
-      if (agent.dead) { liveCount--; continue; }
+      if (agent.dead) {
+        liveCount--;
+        this.telemetry.recordDeath();
+        continue;
+      }
 
       // Energy harvesting: each node that overlaps a zone absorbs energy
       for (const node of agent.nodes) {
@@ -88,6 +247,7 @@ export class World {
         const child = agent.reproduce();
         offspring.push(child);
         this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
+        this.telemetry.recordBirth();
       }
     }
 
@@ -101,6 +261,152 @@ export class World {
         this._spawn(Genome.random());
       }
     }
+
+    // Update rolling diversity history every frame (cheap: O(nk))
+    const diversity = this._computeGenomeDiversity();
+    this.telemetry.recordDiversity(diversity);
+  }
+
+  // ── Telemetry snapshot ────────────────────────────────────────────────────────
+
+  /**
+   * Capture a telemetry snapshot using only O(n) and O(nk) metrics.
+   * Safe to call off the render hot-path (e.g. from a setInterval).
+   * Pass a canvasDataUrl only when an anomaly has already been detected.
+   */
+  captureSnapshot(canvasDataUrl?: string): TelemetrySnapshot {
+    const n = this.agents.length;
+
+    // ── Metric 1: genome diversity (rolling centroid distance, O(nk)) ──────────
+    const genomeDiversity = this._computeGenomeDiversity();
+
+    // ── Metric 2: birth/death ratio trend ─────────────────────────────────────
+    const birthRate = this.telemetry.birthRate;
+    const deathRate = this.telemetry.deathRate;
+    const birthDeathRatio = deathRate < 1e-6 ? birthRate : birthRate / deathRate;
+
+    // ── Metric 3: diversity rate of change ────────────────────────────────────
+    const diversityDelta = this.telemetry.diversityDeltaSinceLastSnapshot;
+    this.telemetry.markSnapshotDiversity(genomeDiversity);
+
+    // ── Metric 4: spatial entropy (16×16 grid, O(n)) ──────────────────────────
+    const spatialEntropy = this._computeSpatialEntropy();
+
+    // ── Population basics (O(n)) ──────────────────────────────────────────────
+    let meanEnergy = 0;
+    for (const a of this.agents) meanEnergy += a.energy;
+    if (n > 0) meanEnergy /= n;
+
+    let variance = 0;
+    for (const a of this.agents) variance += (a.energy - meanEnergy) ** 2;
+    const stddevEnergy = n > 1 ? Math.sqrt(variance / n) : 0;
+
+    // ── Anomaly detection ─────────────────────────────────────────────────────
+    const anomalies: AnomalyFlag[] = [];
+    const checks: Array<[string, number]> = [
+      ['genomeDiversity', genomeDiversity],
+      ['birthDeathRatio', birthDeathRatio],
+      ['spatialEntropy', spatialEntropy],
+      ['meanEnergy', meanEnergy],
+      ['diversityDelta', Math.abs(diversityDelta)],
+    ];
+    for (const [metric, value] of checks) {
+      const flag = this.telemetry.checkAnomaly(metric, value);
+      if (flag) anomalies.push(flag);
+    }
+
+    return {
+      timestamp: Date.now(),
+      simTime: this.time,
+      stepCount: this.stepCount,
+      genomeDiversity,
+      birthRate,
+      deathRate,
+      birthDeathRatio,
+      diversityDelta,
+      spatialEntropy,
+      agentCount: n,
+      meanEnergy,
+      stddevEnergy,
+      anomalies,
+      canvasSnapshot: canvasDataUrl,
+    };
+  }
+
+  /**
+   * Compute mean L2 distance of each agent's genome feature vector from the
+   * population centroid. O(nk) where k = node count × features per node.
+   * Uses a fixed feature set: node dx, dy, dz, mass, radius per node (capped at
+   * 7 nodes = 35 features) for a bounded, comparable representation.
+   */
+  private _computeGenomeDiversity(): number {
+    const n = this.agents.length;
+    if (n < 2) return 0;
+
+    const FEATURES_PER_NODE = 5; // dx, dy, dz, mass, radius
+    const MAX_NODES = 7;
+    const K = MAX_NODES * FEATURES_PER_NODE;
+
+    // Build centroid
+    const centroid = new Float64Array(K);
+    for (const agent of this.agents) {
+      const nodes = agent.genome.nodes.slice(0, MAX_NODES);
+      for (let i = 0; i < nodes.length; i++) {
+        const base = i * FEATURES_PER_NODE;
+        centroid[base + 0] += nodes[i].dx;
+        centroid[base + 1] += nodes[i].dy;
+        centroid[base + 2] += nodes[i].dz;
+        centroid[base + 3] += nodes[i].mass;
+        centroid[base + 4] += nodes[i].radius;
+      }
+    }
+    for (let j = 0; j < K; j++) centroid[j] /= n;
+
+    // Mean L2 distance from centroid
+    let totalDist = 0;
+    for (const agent of this.agents) {
+      const nodes = agent.genome.nodes.slice(0, MAX_NODES);
+      let distSq = 0;
+      for (let i = 0; i < nodes.length; i++) {
+        const base = i * FEATURES_PER_NODE;
+        distSq += (nodes[i].dx    - centroid[base + 0]) ** 2;
+        distSq += (nodes[i].dy    - centroid[base + 1]) ** 2;
+        distSq += (nodes[i].dz    - centroid[base + 2]) ** 2;
+        distSq += (nodes[i].mass  - centroid[base + 3]) ** 2;
+        distSq += (nodes[i].radius - centroid[base + 4]) ** 2;
+      }
+      totalDist += Math.sqrt(distSq);
+    }
+    return totalDist / n;
+  }
+
+  /**
+   * Shannon entropy of agent positions in a GRID_SIZE×GRID_SIZE spatial grid.
+   * O(n) — bins each agent then computes entropy over cell occupancy counts.
+   */
+  private _computeSpatialEntropy(): number {
+    const n = this.agents.length;
+    if (n === 0) return 0;
+
+    const cells = new Float64Array(GRID_SIZE * GRID_SIZE);
+    const scaleX = GRID_SIZE / this.worldWidth;
+    const scaleZ = GRID_SIZE / this.worldDepth;
+
+    for (const agent of this.agents) {
+      const c = agent.centerPos;
+      const gx = Math.min(GRID_SIZE - 1, Math.floor(c.x * scaleX));
+      const gz = Math.min(GRID_SIZE - 1, Math.floor(c.z * scaleZ));
+      cells[gz * GRID_SIZE + gx]++;
+    }
+
+    let entropy = 0;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i] > 0) {
+        const p = cells[i] / n;
+        entropy -= p * Math.log2(p);
+      }
+    }
+    return entropy;
   }
 
   get stats() {
@@ -115,3 +421,4 @@ export class World {
     };
   }
 }
+```
