@@ -1,8 +1,10 @@
+<full new content of the file>
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { World } from '../world/World';
 import { Agent } from '../agent/Agent';
 import { EnergyZone } from '../world/Environment';
+import { Heightfield } from '../world/Heightfield';
 
 // Pre-allocate generous upper bounds — never reallocate during the sim
 const MAX_NODES = 600;
@@ -45,9 +47,9 @@ export class Renderer {
   // ── selection indicator ──
   private _selectionRing: THREE.Mesh;
 
-  // ── ground ──
-  private _groundMesh: THREE.Mesh;
-  private _groundInitialized = false;
+  // ── terrain mesh (replaces flat ground) ──
+  private _terrainMesh: THREE.Mesh | null = null;
+  private _terrainInitialized = false;
 
   constructor(container: HTMLElement) {
     // ── Renderer ──────────────────────────────────────────────────────────────
@@ -88,13 +90,6 @@ export class Renderer {
     const fill = new THREE.DirectionalLight(0x3355aa, 0.5);
     fill.position.set(-300, 200, -300);
     this.scene.add(fill);
-
-    // ── Ground plane ──────────────────────────────────────────────────────────
-    const groundGeo = new THREE.PlaneGeometry(1, 1);
-    groundGeo.rotateX(-Math.PI / 2);
-    const groundMat = new THREE.MeshLambertMaterial({ color: 0x111e11 });
-    this._groundMesh = new THREE.Mesh(groundGeo, groundMat);
-    this.scene.add(this._groundMesh);
 
     // ── Nodes (InstancedMesh) ─────────────────────────────────────────────────
     const sphereGeo = new THREE.SphereGeometry(1, 10, 7);
@@ -153,12 +148,95 @@ export class Renderer {
     });
   }
 
-  // ── Zone visual pool ──────────────────────────────────────────────────────────
+  // ── Terrain mesh ──────────────────────────────────────────────────────────────
 
   /**
-   * Ensure we have enough disc + stem meshes for all zones.
-   * We create them lazily and re-use across frames.
+   * Build a deformed PlaneGeometry from the heightfield.  Called once after the
+   * world is first available.  The geometry subdivision count matches the
+   * heightfield resolution so every grid point maps to a vertex — no extra
+   * interpolation needed in the shader.
    */
+  private _initTerrain(world: World): void {
+    const hf = world.heightfield;
+    const { worldWidth, worldDepth } = world;
+
+    // segments = gridW-1 so vertex count = gridW × gridH
+    const geo = new THREE.PlaneGeometry(
+      worldWidth,
+      worldDepth,
+      hf.gridW - 1,
+      hf.gridH - 1,
+    );
+    // PlaneGeometry is XY-oriented by default; rotate to XZ (Y-up world)
+    geo.rotateX(-Math.PI / 2);
+
+    // Deform Y positions using heightfield data.
+    // After rotateX, position layout is: x, y (height), z per vertex.
+    // Vertices are laid out row-by-row in +X / -Z order by Three.js PlaneGeometry.
+    const positions = geo.attributes['position'] as THREE.BufferAttribute;
+    const vertCount = hf.gridW * hf.gridH;
+
+    for (let i = 0; i < vertCount; i++) {
+      // Three.js PlaneGeometry (after rotateX) enumerates rows along -Z then
+      // +X, but we index the heightfield row=Z, col=X.  Map accordingly:
+      const gz = Math.floor(i / hf.gridW);
+      const gx = i % hf.gridW;
+      const h = hf.grid[gz * hf.gridW + gx];
+      // Y component is index 1 in the interleaved XYZ array
+      positions.setY(i, h);
+    }
+
+    positions.needsUpdate = true;
+    geo.computeVertexNormals();
+
+    // Vertex-colour the terrain based on height for visual clarity
+    const colors = new Float32Array(vertCount * 3);
+    const low  = new THREE.Color(0x112211);  // dark green — valley floors
+    const mid  = new THREE.Color(0x2a4a1e);  // medium green — hillsides
+    const high = new THREE.Color(0x6b5b3e);  // brown — hilltops
+    const tmp  = new THREE.Color();
+
+    for (let i = 0; i < vertCount; i++) {
+      const gz = Math.floor(i / hf.gridW);
+      const gx = i % hf.gridW;
+      const t = hf.grid[gz * hf.gridW + gx] / hf.maxHeight; // 0..1
+
+      if (t < 0.5) {
+        tmp.lerpColors(low, mid, t * 2);
+      } else {
+        tmp.lerpColors(mid, high, (t - 0.5) * 2);
+      }
+      colors[i * 3 + 0] = tmp.r;
+      colors[i * 3 + 1] = tmp.g;
+      colors[i * 3 + 2] = tmp.b;
+    }
+
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const mat = new THREE.MeshLambertMaterial({
+      vertexColors: true,
+    });
+
+    this._terrainMesh = new THREE.Mesh(geo, mat);
+    // Centre the plane over the world origin
+    this._terrainMesh.position.set(worldWidth / 2, 0, worldDepth / 2);
+    this.scene.add(this._terrainMesh);
+
+    // Subtle grid overlay (no fill, just lines) to preserve spatial legibility
+    const grid = new THREE.GridHelper(
+      Math.max(worldWidth, worldDepth),
+      20,
+      0x1e3a1e,
+      0x1e3a1e,
+    );
+    grid.position.set(worldWidth / 2, 0.5, worldDepth / 2);
+    this.scene.add(grid);
+
+    this._terrainInitialized = true;
+  }
+
+  // ── Zone visual pool ──────────────────────────────────────────────────────────
+
   private _ensureZoneVisuals(zones: EnergyZone[]): void {
     while (this._zoneVisuals.length < zones.length) {
       const idx = this._zoneVisuals.length;
@@ -166,7 +244,6 @@ export class Renderer {
       const tier = zone?.tier ?? 0;
       const color = TIER_COLORS[tier];
 
-      // Disc (flat circle)
       const discGeo = new THREE.CircleGeometry(1, 32);
       discGeo.rotateX(-Math.PI / 2);
       const discMat = new THREE.MeshBasicMaterial({
@@ -179,7 +256,6 @@ export class Renderer {
       const disc = new THREE.Mesh(discGeo, discMat);
       this.scene.add(disc);
 
-      // Stem (thin cylinder from ground to zone height) — only for elevated tiers
       let stem: THREE.Mesh | null = null;
       if (tier > 0) {
         const stemGeo = new THREE.CylinderGeometry(1.5, 1.5, 1, 6);
@@ -202,26 +278,14 @@ export class Renderer {
   render(world: World): void {
     this.controls.update();
 
-    // One-time ground + grid setup
-    if (!this._groundInitialized) {
-      this._groundMesh.scale.set(world.worldWidth, 1, world.worldDepth);
-      this._groundMesh.position.set(world.worldWidth / 2, -0.2, world.worldDepth / 2);
-
-      const grid = new THREE.GridHelper(
-        Math.max(world.worldWidth, world.worldDepth),
-        20,
-        0x1e3a1e,
-        0x1e3a1e,
-      );
-      grid.position.set(world.worldWidth / 2, 0.1, world.worldDepth / 2);
-      this.scene.add(grid);
-
-      this._groundInitialized = true;
+    // One-time terrain setup — requires world to be available
+    if (!this._terrainInitialized) {
+      this._initTerrain(world);
     }
 
     this._renderZones(world);
     this._renderAgents(world);
-    this._renderSelection();
+    this._renderSelection(world.heightfield);
 
     this.renderer.render(this.scene, this.camera);
   }
@@ -242,15 +306,19 @@ export class Renderer {
       if (vis.stem) vis.stem.visible = visible;
       if (!visible) continue;
 
-      // Disc: positioned at zone centre, scaled to zone radius
+      // For ground-tier zones, raise the disc to sit on top of the terrain
+      // surface rather than clipping into it.
+      const discY = z.tier === 0
+        ? world.heightfield.heightAt(z.x, z.z) + 0.5
+        : z.y + 0.5;
+
       vis.disc.scale.set(z.radius, 1, z.radius);
-      vis.disc.position.set(z.x, z.y + 0.5, z.z);
+      vis.disc.position.set(z.x, discY, z.z);
       (vis.disc.material as THREE.MeshBasicMaterial).opacity = t * 0.55;
 
-      // Stem: cylinder from Y=0 to Y=z.y
       if (vis.stem && z.y > 0) {
-        vis.stem.scale.set(1, z.y, 1);              // scaleY stretches the unit cylinder
-        vis.stem.position.set(z.x, z.y / 2, z.z);  // centred vertically
+        vis.stem.scale.set(1, z.y, 1);
+        vis.stem.position.set(z.x, z.y / 2, z.z);
         (vis.stem.material as THREE.MeshBasicMaterial).opacity = t * 0.22;
       }
     }
@@ -334,7 +402,7 @@ export class Renderer {
 
   // ── Selection ring ────────────────────────────────────────────────────────────
 
-  private _renderSelection(): void {
+  private _renderSelection(heightfield: Heightfield): void {
     const sel = this.selectedAgent;
     if (!sel || sel.dead) {
       this._selectionRing.visible = false;
@@ -342,7 +410,9 @@ export class Renderer {
     }
     const c = sel.centerPos;
     const r = sel.boundingRadius + 5;
-    this._selectionRing.position.set(c.x, 0.5, c.z);
+    // Place the ring just above the terrain surface at the agent's XZ position
+    const groundY = heightfield.heightAt(c.x, c.z);
+    this._selectionRing.position.set(c.x, groundY + 0.5, c.z);
     this._selectionRing.scale.setScalar(r);
     this._selectionRing.visible = true;
   }
@@ -361,7 +431,7 @@ export class Renderer {
     const cz = worldDepth / 2;
     this.camera.position.set(cx, worldWidth * 0.6, cz + worldWidth * 0.75);
     this.camera.lookAt(cx, 60, cz);
-    this.controls.target.set(cx, 60, cz);   // orbit around mid-tier height
+    this.controls.target.set(cx, 60, cz);
     this.controls.update();
   }
 

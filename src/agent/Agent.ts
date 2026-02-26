@@ -1,7 +1,9 @@
+<full new content of the file>
 import { PhysicsNode } from '../physics/PhysicsNode';
 import { Spring } from '../physics/Spring';
 import { Vec3 } from '../physics/Vec3';
 import { Genome, SENSOR_COUNT } from './Genome';
+import { Heightfield } from '../world/Heightfield';
 
 let nextId = 0;
 
@@ -39,7 +41,7 @@ export class Agent {
   constructor(
     readonly genome: Genome,
     spawnX: number,
-    spawnY: number,  // height above ground for spawn (usually 0)
+    spawnY: number,  // height above ground for spawn — typically the terrain height at (x, z)
     spawnZ: number,
     generation: number = 0,
     parentId: number | null = null,
@@ -80,10 +82,10 @@ export class Agent {
       ),
     );
 
-    // Normalise: shift all nodes so the lowest point sits exactly at radius
-    // (just touching the ground plane at Y=0)
+    // Normalise: shift all nodes so the lowest point sits exactly at spawnY + radius
+    // (just touching the ground surface at the spawn location)
     const lowestY = Math.min(...physNodes.map(n => n.pos.y - n.radius));
-    const shift = -lowestY; // push up so lowest point = 0
+    const shift = spawnY - lowestY; // push up so lowest point = spawnY
     for (const n of physNodes) {
       n.pos.y += shift;
       n.prevPos.y += shift;
@@ -169,6 +171,7 @@ export class Agent {
     zones: EnergyZone[],
     worldWidth: number,
     worldDepth: number,
+    heightfield: Heightfield,
   ): void {
     this.age += dt;
     this.phase += dt * (2.5 + Math.sin(this.phase * 0.3) * 0.5);
@@ -195,7 +198,9 @@ export class Agent {
     // Integrate + constrain
     for (const n of this.nodes) {
       n.integrate(dt);
-      n.constrainToGround(0.35, 0.15);
+      // Use terrain height at the node's current XZ position as the ground floor
+      const groundY = heightfield.heightAt(n.pos.x, n.pos.z);
+      n.constrainToGround(groundY, 0.35, 0.15);
       n.constrainToWorldBounds(0, worldWidth, 0, worldDepth);
     }
 
