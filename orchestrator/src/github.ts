@@ -212,6 +212,30 @@ export async function createPR(
   return pr.html_url;
 }
 
+// ── Create issue ──────────────────────────────────────────────────────────
+
+/**
+ * Open a new issue with an optional set of labels.
+ * Returns the new issue number.
+ */
+export async function createIssue(
+  title: string,
+  body: string,
+  labels: string[] = [],
+): Promise<number> {
+  const res = await fetch(`${GITHUB_API}/repos/${repo()}/issues`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ title, body, labels }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to create issue "${title}": ${res.status} ${text}`);
+  }
+  const issue = await res.json() as { number: number };
+  return issue.number;
+}
+
 // ── Issues list (for consensus cron) ─────────────────────────────────────
 
 export async function getIssuesByLabel(label: string): Promise<GitHubIssue[]> {

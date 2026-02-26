@@ -27,6 +27,10 @@
   color: "fbca04"
   description: User requested additional focused debate via /discuss
 
+- name: deferred
+  color: "8b9dc3"
+  description: Future work identified during debate; promote to proposed when ready
+
 - name: implementing
   color: "7057ff"
   description: A PR is open for this proposal

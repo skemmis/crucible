@@ -7,6 +7,7 @@ import {
   removeLabel,
   getIssue,
   getIssueComments,
+  createIssue,
   type GitHubIssue,
   type GitHubComment,
 } from './github';
@@ -91,7 +92,16 @@ then call a verdict:
 - ✅ PRELIMINARY CONSENSUS — state clearly what to build
 - 🔄 NEEDS MORE DEBATE — state exactly what is still unresolved
 
-200–250 words.`;
+200–250 words.
+
+If you call ✅ PRELIMINARY CONSENSUS and the debate identified future phases or follow-up \
+work that should NOT be implemented now, list each as a deferred item in EXACTLY this format \
+at the end of your response (omit the block entirely if there are no deferred items):
+
+DEFERRED_ITEMS_START
+- <concise issue title> || <1-2 sentence description of what to build and why it was deferred>
+- <concise issue title> || <1-2 sentence description>
+DEFERRED_ITEMS_END`;
 }
 
 function buildFollowUpPrompt(issue: GitHubIssue, priorComments: GitHubComment[]): string {
@@ -201,7 +211,16 @@ ${issue.body ?? '(no description provided)'}
 
 **Full debate thread:**
 
-${thread}`;
+${thread}
+
+If you call consensus-reached and the debate identified future phases or follow-up work \
+that should NOT be part of this implementation, list each as a deferred item in EXACTLY \
+this format at the end of your response (omit the block entirely if there are no deferred items):
+
+DEFERRED_ITEMS_START
+- <concise issue title> || <1-2 sentence description of what to build and why it was deferred>
+- <concise issue title> || <1-2 sentence description>
+DEFERRED_ITEMS_END`;
 }
 
 // ── Staggered posting ─────────────────────────────────────────────────────
@@ -360,6 +379,9 @@ export async function handleRound2(issue: GitHubIssue): Promise<void> {
   const pmVerdict = await callAgent(PM_AGENT, pmRound2Prompt);
   await postComment(issue.number, pmVerdict);
 
+  // ── Auto-file any deferred items the PM identified ────────────────────────
+  await fileDeferredItems(issue.number, pmVerdict);
+
   // ── Signal Round 2 complete ───────────────────────────────────────────────
   await addLabel(issue.number, 'round-2-done');
   console.log(`[dispatch] Issue #${issue.number} — round-2-done label added`);
@@ -448,6 +470,9 @@ export async function handleConsensus(
   const summary = await callAgent(CONSENSUS_AGENT, prompt);
   await postComment(issue.number, summary);
 
+  // Auto-file any deferred items the Consensus Agent identified
+  await fileDeferredItems(issue.number, summary);
+
   // Parse verdict from the summary text
   const reached = summary.includes('CONSENSUS REACHED') || summary.includes('✅');
   if (reached) {
@@ -459,6 +484,54 @@ export async function handleConsensus(
 
 // ── Agent comment detection ───────────────────────────────────────────────
 // Since all agent comments are posted under the repo owner's account,
+// ── Deferred item extraction ──────────────────────────────────────────────
+// When a PM or Consensus Agent verdict includes a DEFERRED_ITEMS_START/END
+// block, parse each line and auto-file it as a new GitHub issue with the
+// `deferred` label. The user can promote any deferred issue to `proposed`
+// when they're ready to debate it.
+
+interface DeferredItem {
+  title: string;
+  description: string;
+}
+
+function parseDeferredItems(verdictText: string): DeferredItem[] {
+  const match = verdictText.match(/DEFERRED_ITEMS_START\n([\s\S]*?)\nDEFERRED_ITEMS_END/);
+  if (!match) return [];
+  return match[1]
+    .split('\n')
+    .map(line => line.replace(/^-\s*/, '').trim())
+    .filter(Boolean)
+    .map(line => {
+      const sep = line.indexOf(' || ');
+      if (sep === -1) return { title: line, description: '' };
+      return {
+        title: line.slice(0, sep).trim(),
+        description: line.slice(sep + 4).trim(),
+      };
+    });
+}
+
+async function fileDeferredItems(
+  parentIssueNumber: number,
+  verdictText: string,
+): Promise<void> {
+  const items = parseDeferredItems(verdictText);
+  if (items.length === 0) return;
+
+  console.log(`[dispatch] Filing ${items.length} deferred item(s) from issue #${parentIssueNumber}`);
+
+  for (const item of items) {
+    const body = `${item.description ? item.description + '\n\n' : ''}_Deferred from #${parentIssueNumber} — promote this issue to \`proposed\` when ready to debate._`;
+    const newNumber = await createIssue(
+      `[DEFERRED] ${item.title}`,
+      body,
+      ['deferred'],
+    );
+    console.log(`[dispatch] Created deferred issue #${newNumber}: ${item.title}`);
+  }
+}
+
 // we detect them by their header signature instead of login name.
 //
 // LLMs sometimes vary the header (different emoji variants, trailing "(cont.)",
