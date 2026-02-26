@@ -1,4 +1,3 @@
-```typescript
 import { Agent } from '../agent/Agent';
 import { Genome } from '../agent/Genome';
 import { Environment } from './Environment';
@@ -563,4 +562,3 @@ export class World {
     };
   }
 }
-```

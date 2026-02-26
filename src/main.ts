@@ -1,4 +1,3 @@
-```typescript
 import { World, DEFAULT_CONFIG, TelemetrySnapshot } from './world/World';
 import { Renderer } from './render/Renderer';
 
@@ -182,4 +181,3 @@ function loop(): void {
 }
 
 requestAnimationFrame(loop);
-```

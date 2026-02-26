@@ -1,13 +1,24 @@
 export interface EnergyZone {
   x: number;
-  y: number;   // always 0 (ground-level)
+  y: number;   // height above ground — 0=ground, 60=mid, 140=high
   z: number;
   radius: number;
   energy: number;
   maxEnergy: number;
   replenishRate: number;
+  tier: 0 | 1 | 2;  // 0=ground, 1=mid, 2=high
 }
 
+/**
+ * Three-tier food landscape:
+ *
+ *  Tier 0 — ground (Y=0):  large zones, moderate energy, easy to reach
+ *  Tier 1 — mid   (Y=60):  medium zones, rich energy, requires some height
+ *  Tier 2 — high  (Y=140): small zones, richest energy, truly out of reach
+ *                           for Gen-0 bodies (radius ~28 → need node at Y≥112)
+ *
+ * Selection pressure: evolve taller bodies to unlock higher tiers.
+ */
 export class Environment {
   zones: EnergyZone[] = [];
 
@@ -20,20 +31,55 @@ export class Environment {
   }
 
   private _seed(count: number): void {
-    for (let i = 0; i < count; i++) {
-      const maxE = 80 + Math.random() * 60;
-      this.zones.push({
-        // Scatter unevenly across the XZ plane so agents must explore in 2D
-        x: (i % Math.ceil(Math.sqrt(count)) + 0.2 + Math.random() * 0.6)
-           * (this.worldWidth / Math.ceil(Math.sqrt(count))),
-        y: 0,
-        z: (Math.floor(i / Math.ceil(Math.sqrt(count))) + 0.2 + Math.random() * 0.6)
-           * (this.worldDepth / Math.ceil(Math.sqrt(count))),
-        radius: 55 + Math.random() * 40,
-        energy: maxE,
-        maxEnergy: maxE,
-        replenishRate: 1.5 + Math.random() * 2.5,
-      });
+    const perTier = Math.floor(count / 3);
+    const tiers: Array<{
+      y: number;
+      tier: 0 | 1 | 2;
+      radiusMin: number;
+      radiusMax: number;
+      energyMin: number;
+      energyMax: number;
+      replenishMin: number;
+      replenishMax: number;
+    }> = [
+      // Ground — plentiful, easy
+      {
+        y: 0, tier: 0,
+        radiusMin: 60, radiusMax: 90,
+        energyMin: 80, energyMax: 120,
+        replenishMin: 2.0, replenishMax: 4.0,
+      },
+      // Mid — richer, requires height
+      {
+        y: 60, tier: 1,
+        radiusMin: 40, radiusMax: 60,
+        energyMin: 120, energyMax: 180,
+        replenishMin: 1.5, replenishMax: 3.0,
+      },
+      // High — richest, truly out of reach until evolved
+      {
+        y: 140, tier: 2,
+        radiusMin: 22, radiusMax: 35,
+        energyMin: 180, energyMax: 260,
+        replenishMin: 1.0, replenishMax: 2.5,
+      },
+    ];
+
+    for (const td of tiers) {
+      for (let i = 0; i < perTier; i++) {
+        const maxE = td.energyMin + Math.random() * (td.energyMax - td.energyMin);
+        this.zones.push({
+          // Scatter independently across XZ for each tier
+          x: 60 + Math.random() * (this.worldWidth - 120),
+          y: td.y,
+          z: 60 + Math.random() * (this.worldDepth - 120),
+          radius: td.radiusMin + Math.random() * (td.radiusMax - td.radiusMin),
+          energy: maxE,
+          maxEnergy: maxE,
+          replenishRate: td.replenishMin + Math.random() * (td.replenishMax - td.replenishMin),
+          tier: td.tier,
+        });
+      }
     }
   }
 
@@ -45,8 +91,8 @@ export class Environment {
 
   /**
    * Attempt to harvest energy from any zone overlapping the given sphere.
-   * Distance is measured in 3-D (XYZ) but zones sit at Y=0 so it's
-   * effectively XZ-dominant when nodes are close to the ground.
+   * Uses full 3D distance — nodes must be physically near the zone centre
+   * (including matching height for elevated zones).
    */
   harvest(x: number, y: number, z: number, radius: number): number {
     let total = 0;

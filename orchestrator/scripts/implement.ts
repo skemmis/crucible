@@ -161,7 +161,9 @@ function parseImplementation(response: string): ParsedImplementation {
       const newline = chunk.indexOf('\n');
       if (newline === -1) continue;
       const filePath = chunk.slice(0, newline).trim();
-      const fileContent = chunk.slice(newline + 1);
+      // Strip markdown code fences that LLMs sometimes wrap content in
+      let fileContent = chunk.slice(newline + 1);
+      fileContent = fileContent.replace(/^```[^\n]*\n/, '').replace(/\n```\s*$/, '');
       if (filePath) files.set(filePath, fileContent);
     }
   }

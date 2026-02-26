@@ -1,4 +1,3 @@
-```typescript
 /**
  * telemetry.ts — Fetches recent simulation snapshots from Vercel KV and
  * formats them as a `## Current simulation state` section for agent prompts.
@@ -245,4 +244,3 @@ export async function buildTelemetryPromptSection(snapshotCount: number = 20): P
   const summary = buildSummary(snapshots);
   return formatForPrompt(summary);
 }
-```

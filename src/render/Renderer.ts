@@ -2,10 +2,23 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { World } from '../world/World';
 import { Agent } from '../agent/Agent';
+import { EnergyZone } from '../world/Environment';
 
 // Pre-allocate generous upper bounds — never reallocate during the sim
-const MAX_NODES = 600;    // max total nodes across all agents
-const MAX_SPRINGS = 1800; // max total spring segments
+const MAX_NODES = 600;
+const MAX_SPRINGS = 1800;
+
+// Per-tier visual palette
+const TIER_COLORS = [
+  new THREE.Color(0x3cdc50),   // 0: ground — green
+  new THREE.Color(0xb8e020),   // 1: mid    — yellow-green
+  new THREE.Color(0xff8c00),   // 2: high   — amber
+];
+
+interface ZoneVisual {
+  disc: THREE.Mesh;
+  stem: THREE.Mesh | null; // null for ground-tier zones
+}
 
 export class Renderer {
   readonly renderer: THREE.WebGLRenderer;
@@ -26,8 +39,8 @@ export class Renderer {
   private _springGeo: THREE.BufferGeometry;
   private _springLines: THREE.LineSegments;
 
-  // ── energy zones (one flat disc per zone) ──
-  private _zoneMeshes: THREE.Mesh[] = [];
+  // ── energy zones ──
+  private _zoneVisuals: ZoneVisual[] = [];
 
   // ── selection indicator ──
   private _selectionRing: THREE.Mesh;
@@ -41,13 +54,12 @@ export class Renderer {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(container.clientWidth, container.clientHeight);
-    this.renderer.shadowMap.enabled = false; // keep perf budget free for physics
     container.appendChild(this.renderer.domElement);
 
     // ── Scene ─────────────────────────────────────────────────────────────────
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x070b14);
-    this.scene.fog = new THREE.FogExp2(0x070b14, 0.0006);
+    this.scene.fog = new THREE.FogExp2(0x070b14, 0.00045);
 
     // ── Camera ────────────────────────────────────────────────────────────────
     this.camera = new THREE.PerspectiveCamera(
@@ -56,18 +68,16 @@ export class Renderer {
       1,
       6000,
     );
-    // Initial position: elevated and looking down at origin — resetCamera() fixes it
-    this.camera.position.set(600, 500, 1100);
-    this.camera.lookAt(600, 0, 600);
+    this.camera.position.set(600, 600, 1300);
 
     // ── Controls ──────────────────────────────────────────────────────────────
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.target.set(600, 0, 600);
+    this.controls.target.set(600, 60, 600);   // look toward mid-tier height
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.minDistance = 30;
     this.controls.maxDistance = 4000;
-    this.controls.maxPolarAngle = Math.PI / 2 - 0.01; // don't go below ground
+    this.controls.maxPolarAngle = Math.PI / 2 - 0.01;
     this.controls.update();
 
     // ── Lighting ──────────────────────────────────────────────────────────────
@@ -94,7 +104,8 @@ export class Renderer {
     this._nodeMesh.instanceColor = new THREE.InstancedBufferAttribute(
       new Float32Array(MAX_NODES * 3), 3,
     );
-    (this._nodeMesh.instanceColor as THREE.InstancedBufferAttribute).setUsage(THREE.DynamicDrawUsage);
+    (this._nodeMesh.instanceColor as THREE.InstancedBufferAttribute)
+      .setUsage(THREE.DynamicDrawUsage);
     this._nodeMesh.count = 0;
     this.scene.add(this._nodeMesh);
 
@@ -142,36 +153,60 @@ export class Renderer {
     });
   }
 
-  // ── Zone disc pool ────────────────────────────────────────────────────────────
+  // ── Zone visual pool ──────────────────────────────────────────────────────────
 
-  private _ensureZoneDiscs(count: number): void {
-    while (this._zoneMeshes.length < count) {
-      const geo = new THREE.CircleGeometry(1, 28);
-      geo.rotateX(-Math.PI / 2);
-      const mat = new THREE.MeshBasicMaterial({
-        color: 0x3cdc50,
+  /**
+   * Ensure we have enough disc + stem meshes for all zones.
+   * We create them lazily and re-use across frames.
+   */
+  private _ensureZoneVisuals(zones: EnergyZone[]): void {
+    while (this._zoneVisuals.length < zones.length) {
+      const idx = this._zoneVisuals.length;
+      const zone = zones[idx];
+      const tier = zone?.tier ?? 0;
+      const color = TIER_COLORS[tier];
+
+      // Disc (flat circle)
+      const discGeo = new THREE.CircleGeometry(1, 32);
+      discGeo.rotateX(-Math.PI / 2);
+      const discMat = new THREE.MeshBasicMaterial({
+        color: color.clone(),
         transparent: true,
-        opacity: 0.35,
+        opacity: 0.45,
         side: THREE.DoubleSide,
         depthWrite: false,
       });
-      const m = new THREE.Mesh(geo, mat);
-      this.scene.add(m);
-      this._zoneMeshes.push(m);
+      const disc = new THREE.Mesh(discGeo, discMat);
+      this.scene.add(disc);
+
+      // Stem (thin cylinder from ground to zone height) — only for elevated tiers
+      let stem: THREE.Mesh | null = null;
+      if (tier > 0) {
+        const stemGeo = new THREE.CylinderGeometry(1.5, 1.5, 1, 6);
+        const stemMat = new THREE.MeshBasicMaterial({
+          color: color.clone(),
+          transparent: true,
+          opacity: 0.18,
+          depthWrite: false,
+        });
+        stem = new THREE.Mesh(stemGeo, stemMat);
+        this.scene.add(stem);
+      }
+
+      this._zoneVisuals.push({ disc, stem });
     }
   }
 
-  // ── Main render loop entry point ──────────────────────────────────────────────
+  // ── Main render loop ──────────────────────────────────────────────────────────
 
   render(world: World): void {
     this.controls.update();
 
-    // One-time ground sizing
+    // One-time ground + grid setup
     if (!this._groundInitialized) {
       this._groundMesh.scale.set(world.worldWidth, 1, world.worldDepth);
       this._groundMesh.position.set(world.worldWidth / 2, -0.2, world.worldDepth / 2);
 
-      // Add a grid helper for spatial reference
       const grid = new THREE.GridHelper(
         Math.max(world.worldWidth, world.worldDepth),
         20,
@@ -195,20 +230,34 @@ export class Renderer {
 
   private _renderZones(world: World): void {
     const zones = world.env.zones;
-    this._ensureZoneDiscs(zones.length);
+    this._ensureZoneVisuals(zones);
 
     for (let i = 0; i < zones.length; i++) {
       const z = zones[i];
       const t = z.energy / z.maxEnergy;
-      const mesh = this._zoneMeshes[i];
-      mesh.visible = t > 0.02;
-      if (!mesh.visible) continue;
-      mesh.scale.set(z.radius, 1, z.radius);
-      mesh.position.set(z.x, 0.3, z.z);
-      (mesh.material as THREE.MeshBasicMaterial).opacity = t * 0.5;
+      const vis = this._zoneVisuals[i];
+
+      const visible = t > 0.02;
+      vis.disc.visible = visible;
+      if (vis.stem) vis.stem.visible = visible;
+      if (!visible) continue;
+
+      // Disc: positioned at zone centre, scaled to zone radius
+      vis.disc.scale.set(z.radius, 1, z.radius);
+      vis.disc.position.set(z.x, z.y + 0.5, z.z);
+      (vis.disc.material as THREE.MeshBasicMaterial).opacity = t * 0.55;
+
+      // Stem: cylinder from Y=0 to Y=z.y
+      if (vis.stem && z.y > 0) {
+        vis.stem.scale.set(1, z.y, 1);              // scaleY stretches the unit cylinder
+        vis.stem.position.set(z.x, z.y / 2, z.z);  // centred vertically
+        (vis.stem.material as THREE.MeshBasicMaterial).opacity = t * 0.22;
+      }
     }
-    for (let i = zones.length; i < this._zoneMeshes.length; i++) {
-      this._zoneMeshes[i].visible = false;
+
+    for (let i = zones.length; i < this._zoneVisuals.length; i++) {
+      this._zoneVisuals[i].disc.visible = false;
+      if (this._zoneVisuals[i].stem) this._zoneVisuals[i].stem!.visible = false;
     }
   }
 
@@ -231,7 +280,6 @@ export class Renderer {
         this._dummy.updateMatrix();
         this._nodeMesh.setMatrixAt(nodeIdx, this._dummy.matrix);
 
-        // Energy-tinted hue: bright = well-fed, dark = hungry
         const energyRatio = Math.min(1, agent.energy / 250);
         const lightness = 0.38 + energyRatio * 0.32;
         this._nodeColor.setHSL(hue, 0.72, isSel ? lightness + 0.15 : lightness);
@@ -243,7 +291,7 @@ export class Renderer {
       // ── Springs ────────────────────────────────────────────────────────────
       for (const spring of agent.springs) {
         if (springIdx >= MAX_SPRINGS) break;
-        const b = springIdx * 6; // 2 verts × 3 floats
+        const b = springIdx * 6;
 
         this._springPositions[b + 0] = spring.nodeA.pos.x;
         this._springPositions[b + 1] = spring.nodeA.pos.y;
@@ -253,36 +301,31 @@ export class Renderer {
         this._springPositions[b + 5] = spring.nodeB.pos.z;
 
         if (spring.isActuated) {
-          const act = spring.activation; // [-1, 1]
-          // Positive = extending (warm red), negative = contracting (cool cyan)
+          const act = spring.activation;
           const r = act > 0 ? act * 0.95 : 0.05;
           const g = act > 0 ? 0.05 : 0.15;
           const bl = act < 0 ? -act * 0.9 : 0.55;
-          this._springColors[b + 0] = r;
-          this._springColors[b + 1] = g;
-          this._springColors[b + 2] = bl;
-          this._springColors[b + 3] = r;
-          this._springColors[b + 4] = g;
-          this._springColors[b + 5] = bl;
+          for (let v = 0; v < 2; v++) {
+            this._springColors[b + v * 3 + 0] = r;
+            this._springColors[b + v * 3 + 1] = g;
+            this._springColors[b + v * 3 + 2] = bl;
+          }
         } else {
           const grey = isSel ? 0.55 : 0.28;
-          this._springColors[b + 0] = grey;
-          this._springColors[b + 1] = grey * 1.05;
-          this._springColors[b + 2] = grey * 1.15;
-          this._springColors[b + 3] = grey;
-          this._springColors[b + 4] = grey * 1.05;
-          this._springColors[b + 5] = grey * 1.15;
+          for (let k = 0; k < 6; k += 3) {
+            this._springColors[b + k + 0] = grey;
+            this._springColors[b + k + 1] = grey * 1.05;
+            this._springColors[b + k + 2] = grey * 1.15;
+          }
         }
         springIdx++;
       }
     }
 
-    // ── Upload to GPU ─────────────────────────────────────────────────────────
+    // Upload to GPU
     this._nodeMesh.count = nodeIdx;
     this._nodeMesh.instanceMatrix.needsUpdate = true;
-    if (this._nodeMesh.instanceColor) {
-      this._nodeMesh.instanceColor.needsUpdate = true;
-    }
+    if (this._nodeMesh.instanceColor) this._nodeMesh.instanceColor.needsUpdate = true;
 
     this._springGeo.setDrawRange(0, springIdx * 2);
     (this._springGeo.attributes['position'] as THREE.BufferAttribute).needsUpdate = true;
@@ -306,24 +349,22 @@ export class Renderer {
 
   // ── Camera helpers ────────────────────────────────────────────────────────────
 
-  /** Smoothly pan the orbit target toward the selected agent. */
   followAgent(agent: Agent): void {
     const c = agent.centerPos;
     this.controls.target.x += (c.x - this.controls.target.x) * 0.05;
+    this.controls.target.y += (c.y - this.controls.target.y) * 0.05;
     this.controls.target.z += (c.z - this.controls.target.z) * 0.05;
   }
 
-  /** Reset camera to an overview of the whole world. */
   resetCamera(worldWidth: number, worldDepth: number): void {
     const cx = worldWidth / 2;
     const cz = worldDepth / 2;
-    this.camera.position.set(cx, worldWidth * 0.55, cz + worldWidth * 0.7);
-    this.camera.lookAt(cx, 0, cz);
-    this.controls.target.set(cx, 0, cz);
+    this.camera.position.set(cx, worldWidth * 0.6, cz + worldWidth * 0.75);
+    this.camera.lookAt(cx, 60, cz);
+    this.controls.target.set(cx, 60, cz);   // orbit around mid-tier height
     this.controls.update();
   }
 
-  /** Pick the agent nearest a screen (x, y) click. Returns null if none nearby. */
   pickAgent(screenX: number, screenY: number, agents: Agent[]): Agent | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const ndcX = ((screenX - rect.left) / rect.width) * 2 - 1;
@@ -332,12 +373,14 @@ export class Renderer {
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
 
-    // Ray-sphere test against each agent's center
     let best: Agent | null = null;
     let bestDist = Infinity;
     for (const agent of agents) {
       const c = agent.centerPos;
-      const sphere = new THREE.Sphere(new THREE.Vector3(c.x, c.y, c.z), agent.boundingRadius + 8);
+      const sphere = new THREE.Sphere(
+        new THREE.Vector3(c.x, c.y, c.z),
+        agent.boundingRadius + 8,
+      );
       const ray = raycaster.ray;
       if (ray.intersectsSphere(sphere)) {
         const d = ray.origin.distanceTo(new THREE.Vector3(c.x, c.y, c.z));
