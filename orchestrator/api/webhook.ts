@@ -10,22 +10,35 @@ import { getIssue, getIssueComments } from '../src/github';
 
 // ── Webhook signature verification ────────────────────────────────────────
 
-function verifySignature(rawBody: string, signature: string | undefined): boolean {
+type VerifyResult = 'ok' | 'missing-secret' | 'missing-signature' | 'invalid-signature';
+
+function verifySignature(rawBody: string, signature: string | undefined): VerifyResult {
   const secret = process.env.GITHUB_WEBHOOK_SECRET;
-  if (!secret || !signature) return false;
+  if (!secret) return 'missing-secret';
+  if (!signature) return 'missing-signature';
   const expected =
     'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
   try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    const valid = crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    return valid ? 'ok' : 'invalid-signature';
   } catch {
-    return false;
+    return 'invalid-signature';
   }
 }
 
 // ── Raw body buffering ────────────────────────────────────────────────────
+// Vercel's Node.js runtime does NOT pre-parse bodies for bare functions,
+// so we read the stream directly. If the body was already consumed (edge case),
+// fall back to re-serialising req.body.
 
 function getRawBody(req: VercelRequest): Promise<string> {
   return new Promise((resolve, reject) => {
+    // If Vercel already parsed the body (shouldn't happen for bare functions,
+    // but guard against it anyway)
+    if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+      resolve(JSON.stringify(req.body));
+      return;
+    }
     let data = '';
     req.on('data', chunk => (data += chunk));
     req.on('end', () => resolve(data));
@@ -47,9 +60,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   // Verify webhook signature
   const signature = req.headers['x-hub-signature-256'] as string | undefined;
-  if (!verifySignature(rawBody, signature)) {
-    console.warn('[webhook] Invalid signature — rejecting request');
-    res.status(401).send('Unauthorized');
+  const verifyResult = verifySignature(rawBody, signature);
+  if (verifyResult !== 'ok') {
+    console.warn(`[webhook] Auth failed: ${verifyResult} | body length: ${rawBody.length}`);
+    res.status(401).send(verifyResult);
     return;
   }
 
