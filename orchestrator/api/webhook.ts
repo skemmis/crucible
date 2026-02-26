@@ -114,8 +114,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // Only follow up on issues that are actively debating
       if (!labels.includes('debating')) return;
 
-      // Don't respond to bot comments (including our own)
-      if (!isHumanComment(comment.user.login)) return;
+      // Don't respond to bot comments or agent comments (including our own)
+      if (!isHumanComment(comment.user.login, comment.body)) return;
 
       const [freshIssue, comments] = await Promise.all([
         getIssue(issue.number),

@@ -175,14 +175,29 @@ export async function handleConsensus(
   }
 }
 
-// ── Bot username detection ────────────────────────────────────────────────
-// Prevents the orchestrator from responding to its own comments.
+// ── Agent comment detection ───────────────────────────────────────────────
+// Since all agent comments are posted under the repo owner's account,
+// we detect them by their emoji header signature instead of login name.
+
+const AGENT_HEADERS = [
+  '**🌿 Naturalist**',
+  '**⚙️ Systems Engineer**',
+  '**🌀 Chaos Agent**',
+  '**🎮 Game Designer**',
+  '**🔬 SFI Fellow**',
+  '**🧬 Evolutionary Biologist**',
+  '**🤝 Consensus Agent**',
+];
+
+export function isAgentComment(body: string): boolean {
+  return AGENT_HEADERS.some(h => body.trimStart().startsWith(h));
+}
 
 const BOT_LOGINS = new Set([
   'github-actions[bot]',
   'dependabot[bot]',
 ]);
 
-export function isHumanComment(login: string): boolean {
-  return !BOT_LOGINS.has(login) && !login.endsWith('[bot]');
+export function isHumanComment(login: string, body: string): boolean {
+  return !BOT_LOGINS.has(login) && !login.endsWith('[bot]') && !isAgentComment(body);
 }
