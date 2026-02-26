@@ -1,10 +1,11 @@
+<full new content of the file>
 import { Vec3 } from './Vec3';
 
 /**
  * A point mass in 3-D space.
  *
  * Convention (Three.js Y-up):
- *   +Y  = up   (ground surface is at Y = 0)
+ *   +Y  = up   (ground surface is at Y = groundY, not necessarily 0)
  *   +X  = right
  *   +Z  = toward viewer in default camera orientation
  *
@@ -47,19 +48,26 @@ export class PhysicsNode {
   }
 
   /**
-   * Keep node above the ground plane (Y = 0).
+   * Keep node above the ground surface at height `groundY`.
+   *
+   * groundY    : local terrain height at this node's (x, z) position.
+   *              Pass 0 for a flat ground plane (original behaviour).
    * friction   ∈ [0, 1]: XZ velocity damping on contact.
    * restitution ∈ [0, 1]: vertical bounce factor.
    */
-  constrainToGround(friction: number = 0.35, restitution: number = 0.15): void {
-    const minY = this.radius;
+  constrainToGround(
+    groundY: number = 0,
+    friction: number = 0.35,
+    restitution: number = 0.15,
+  ): void {
+    const minY = groundY + this.radius;
     if (this.pos.y < minY) {
       const velX = this.pos.x - this.prevPos.x;
       const velY = this.pos.y - this.prevPos.y;
       const velZ = this.pos.z - this.prevPos.z;
 
       this.pos.y = minY;
-      this.prevPos.y = this.pos.y + velY * restitution;   // bounce
+      this.prevPos.y = this.pos.y + velY * restitution;    // bounce
       this.prevPos.x = this.pos.x - velX * (1 - friction); // XZ friction
       this.prevPos.z = this.pos.z - velZ * (1 - friction);
     }

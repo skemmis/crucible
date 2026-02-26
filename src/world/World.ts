@@ -1,6 +1,8 @@
+<full new content of the file>
 import { Agent } from '../agent/Agent';
 import { Genome } from '../agent/Genome';
 import { Environment } from './Environment';
+import { Heightfield } from './Heightfield';
 
 export interface WorldConfig {
   worldWidth: number;
@@ -8,6 +10,10 @@ export interface WorldConfig {
   initialAgents: number;
   maxAgents: number;
   zoneCount: number;
+  /** Heightfield resolution (grid points per axis). Default 64. */
+  heightfieldResolution?: number;
+  /** Maximum terrain height in world units. Default 28. */
+  heightfieldAmplitude?: number;
 }
 
 export const DEFAULT_CONFIG: WorldConfig = {
@@ -16,6 +22,8 @@ export const DEFAULT_CONFIG: WorldConfig = {
   initialAgents: 16,
   maxAgents: 60,
   zoneCount: 24,   // increased from 12 → 24 to distribute agents and reduce bottlenecking
+  heightfieldResolution: 64,
+  heightfieldAmplitude: 28,
 };
 
 // ── Telemetry types ────────────────────────────────────────────────────────────
@@ -183,6 +191,8 @@ class TelemetryTracker {
 export class World {
   agents: Agent[] = [];
   env: Environment;
+  /** Static heightfield baked at construction — never mutated at runtime. */
+  readonly heightfield: Heightfield;
   time: number = 0;
   stepCount: number = 0;
 
@@ -205,6 +215,14 @@ export class World {
     this.maxAgents = cfg.maxAgents;
     this.env = new Environment(cfg.worldWidth, cfg.worldDepth, cfg.zoneCount);
 
+    // Bake heightfield once — static for the entire simulation run
+    this.heightfield = new Heightfield(
+      cfg.worldWidth,
+      cfg.worldDepth,
+      cfg.heightfieldResolution ?? 64,
+      cfg.heightfieldAmplitude ?? 28,
+    );
+
     for (let i = 0; i < cfg.initialAgents; i++) {
       this._spawn(Genome.random());
     }
@@ -213,10 +231,12 @@ export class World {
   private _spawn(genome: Genome, parentAgent?: Agent): Agent {
     const x = 50 + Math.random() * (this.worldWidth - 100);
     const z = 50 + Math.random() * (this.worldDepth - 100);
+    // Spawn on top of the terrain surface at this (x, z) location
+    const groundY = this.heightfield.heightAt(x, z);
     const a = new Agent(
       genome,
       x,
-      0,    // spawn at ground level; _develop() lifts body above Y=0
+      groundY,   // _develop() lifts body above this height
       z,
       parentAgent?.generation ?? 0,
       parentAgent?.id ?? null,
@@ -251,7 +271,7 @@ export class World {
         continue;
       }
 
-      agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth);
+      agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield);
       if (agent.dead) {
         liveCount--;
         this.telemetry.recordDeath();
@@ -321,15 +341,9 @@ export class World {
     const spatialEntropy = this._computeSpatialEntropy();
 
     // ── Metric 5: energy-acquisition variance ─────────────────────────────────
-    // A crowding/niche-differentiation diagnostic.
-    // If crowding is producing scramble competition, all agents get roughly the
-    // same (low) energy per frame → low variance.
-    // If niches are forming, some agents reliably out-acquire others → high variance.
     const energyAcquisitionVariance = this._computeEnergyAcquisitionVariance();
 
     // ── Metric 6: morphological variance by generation bucket ─────────────────
-    // Tells us whether selection is differentiating body plans across generations
-    // or driving convergence. Collapsing variance per bucket = scramble selection.
     const morphologicalVarianceByGeneration = this._computeMorphologicalVarianceByGeneration();
 
     // ── Population basics (O(n)) ──────────────────────────────────────────────
@@ -376,12 +390,6 @@ export class World {
     };
   }
 
-  /**
-   * Compute mean L2 distance of each agent's genome feature vector from the
-   * population centroid. O(nk) where k = node count × features per node.
-   * Uses a fixed feature set: node dx, dy, dz, mass, radius per node (capped at
-   * 7 nodes = 35 features) for a bounded, comparable representation.
-   */
   private _computeGenomeDiversity(): number {
     const n = this.agents.length;
     if (n < 2) return 0;
@@ -390,7 +398,6 @@ export class World {
     const MAX_NODES = 7;
     const K = MAX_NODES * FEATURES_PER_NODE;
 
-    // Build centroid
     const centroid = new Float64Array(K);
     for (const agent of this.agents) {
       const nodes = agent.genome.nodes.slice(0, MAX_NODES);
@@ -405,7 +412,6 @@ export class World {
     }
     for (let j = 0; j < K; j++) centroid[j] /= n;
 
-    // Mean L2 distance from centroid
     let totalDist = 0;
     for (const agent of this.agents) {
       const nodes = agent.genome.nodes.slice(0, MAX_NODES);
@@ -423,10 +429,6 @@ export class World {
     return totalDist / n;
   }
 
-  /**
-   * Shannon entropy of agent positions in a GRID_SIZE×GRID_SIZE spatial grid.
-   * O(n) — bins each agent then computes entropy over cell occupancy counts.
-   */
   private _computeSpatialEntropy(): number {
     const n = this.agents.length;
     if (n === 0) return 0;
@@ -452,13 +454,6 @@ export class World {
     return entropy;
   }
 
-  /**
-   * Variance in per-agent energy-acquisition rate across the current frame.
-   * Uses the _frameEnergyGained map populated during update().
-   *
-   * Low variance → all agents acquiring similar energy → undifferentiated scramble.
-   * Rising variance → some agents reliably out-acquire others → niche formation.
-   */
   private _computeEnergyAcquisitionVariance(): number {
     const n = this.agents.length;
     if (n < 2) return 0;
@@ -477,20 +472,11 @@ export class World {
     return varSum / n;
   }
 
-  /**
-   * For each generation bucket (0–9, 10–19, 20–49, 50+), compute the mean
-   * morphological L2 distance from that bucket's own centroid.
-   *
-   * If crowding drives convergence, variance should collapse toward zero for
-   * mature generation buckets. If niches are forming, variance should remain
-   * high or grow. This is the primary "is crowding doing useful work?" signal.
-   */
   private _computeMorphologicalVarianceByGeneration(): GenerationVarianceBucket[] {
     const FEATURES_PER_NODE = 5;
     const MAX_NODES = 7;
     const K = MAX_NODES * FEATURES_PER_NODE;
 
-    // Define buckets: [label, minGen, maxGen (exclusive)]
     const bucketDefs: Array<[string, number, number]> = [
       ['0–9',   0,  10],
       ['10–19', 10, 20],
@@ -509,7 +495,6 @@ export class World {
         continue;
       }
 
-      // Compute centroid for this bucket
       const centroid = new Float64Array(K);
       for (const agent of bucket) {
         const nodes = agent.genome.nodes.slice(0, MAX_NODES);
@@ -524,7 +509,6 @@ export class World {
       }
       for (let j = 0; j < K; j++) centroid[j] /= bucket.length;
 
-      // Mean L2 distance from bucket centroid
       let totalDist = 0;
       for (const agent of bucket) {
         const nodes = agent.genome.nodes.slice(0, MAX_NODES);
