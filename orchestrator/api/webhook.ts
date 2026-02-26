@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import crypto from 'crypto';
 import {
   handleNewProposal,
+  handleRound2,
   handleFollowUp,
   handleConsensus,
   isHumanComment,
@@ -103,6 +104,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         if (!currentLabels.includes('debating')) {
           await handleNewProposal(issue);
         }
+      }
+
+      // Round 1 complete → kick off Round 2
+      if (addedLabel === 'round-1-done') {
+        await handleRound2(issue);
       }
     }
 

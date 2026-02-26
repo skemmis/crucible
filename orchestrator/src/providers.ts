@@ -43,12 +43,13 @@ export async function callAgent(agent: AgentConfig, userPrompt: string): Promise
 async function callClaude(agent: AgentConfig, userPrompt: string): Promise<string> {
   const client = anthropicClient();
 
+  const budgetTokens = agent.thinkingBudget ?? 8000;
   const message = await client.messages.create({
     model: agent.model,
-    max_tokens: 16000,        // must be ≥ budget_tokens + expected output
+    max_tokens: budgetTokens + 8000, // output headroom on top of thinking budget
     thinking: {
       type: 'enabled',
-      budget_tokens: 8000,    // up to 8k tokens of internal reasoning
+      budget_tokens: budgetTokens,
     } as any,                 // thinking is natively supported; cast for SDK compat
     system: agent.systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
@@ -78,7 +79,7 @@ async function callGemini(agent: AgentConfig, userPrompt: string): Promise<strin
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     // thinkingConfig supported in @google/generative-ai ≥0.24.0
     generationConfig: {
-      thinkingConfig: { thinkingBudget: 5000 },
+      thinkingConfig: { thinkingBudget: agent.thinkingBudget ?? 5000 },
     } as any,
   });
 

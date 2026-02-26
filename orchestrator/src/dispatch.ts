@@ -1,4 +1,4 @@
-import { AGENTS, CONSENSUS_AGENT } from './agents';
+import { AGENTS, CONSENSUS_AGENT, PM_AGENT } from './agents';
 import { callAgent } from './providers';
 import {
   postComment,
@@ -23,6 +23,75 @@ ${issue.body ?? '(no description provided)'}
 
 ---
 Respond as your persona. Be substantive. ~200–300 words.`;
+}
+
+function buildPMRound1Prompt(issue: GitHubIssue, round1Comments: GitHubComment[]): string {
+  const thread = round1Comments
+    .map(c => `**${c.user.login}**:\n${c.body}`)
+    .join('\n\n---\n\n');
+
+  return `\
+Round 1 of debate on a Crucible proposal has just completed. You are the Product Manager.
+
+**Issue #${issue.number}: ${issue.title}**
+
+**Original proposal:**
+${issue.body ?? '(no description provided)'}
+
+**Round 1 comments:**
+
+${thread}
+
+---
+Write your Round 1 synthesis: identify where experts agree, name the 1–2 real cruxes that remain, \
+and pose a sharp focused question for the Round 2 agents to answer. 150–200 words.`;
+}
+
+function buildRound2AgentPrompt(issue: GitHubIssue, allComments: GitHubComment[]): string {
+  const thread = allComments
+    .map(c => `**${c.user.login}** (${new Date(c.created_at).toLocaleDateString()}):\n${c.body}`)
+    .join('\n\n---\n\n');
+
+  return `\
+This is Round 2 of debate on a Crucible proposal. Read the full thread (Round 1 + PM synthesis), \
+then give your updated take — specifically address the crux question the PM identified.
+
+**Issue #${issue.number}: ${issue.title}**
+
+${issue.body ?? '(no description provided)'}
+
+**Full thread so far:**
+
+${thread}
+
+---
+Respond as your persona. Address the PM's framing question directly. ~200–300 words.`;
+}
+
+function buildPMRound2Prompt(issue: GitHubIssue, allComments: GitHubComment[]): string {
+  const thread = allComments
+    .map(c => `**${c.user.login}**:\n${c.body}`)
+    .join('\n\n---\n\n');
+
+  return `\
+Round 2 of debate on a Crucible proposal has completed. You are the Product Manager.
+
+**Issue #${issue.number}: ${issue.title}**
+
+**Original proposal:**
+${issue.body ?? '(no description provided)'}
+
+**Full debate thread (Round 1 + Round 2):**
+
+${thread}
+
+---
+Write your Round 2 synthesis: briefly restate the cruxes, say how Round 2 resolved them, \
+then call a verdict:
+- ✅ PRELIMINARY CONSENSUS — state clearly what to build
+- 🔄 NEEDS MORE DEBATE — state exactly what is still unresolved
+
+200–250 words.`;
 }
 
 function buildFollowUpPrompt(issue: GitHubIssue, priorComments: GitHubComment[]): string {
@@ -74,11 +143,15 @@ function delay(ms: number): Promise<void> {
  * Call all agents in parallel, then post their responses staggered
  * so the thread reads as a natural conversation rather than a wall of
  * simultaneous comments.
+ *
+ * @param lateGuardHeader - if set, skip posting if any comment already starts with this header
+ *   (used to prevent duplicate PM posts across concurrent webhook events)
  */
 async function postAgentResponses(
   issueNumber: number,
   prompt: string,
   agentSubset = AGENTS,
+  lateGuardHeader?: string,
 ): Promise<void> {
   console.log(`[dispatch] Calling ${agentSubset.length} agents for issue #${issueNumber}…`);
 
@@ -91,9 +164,13 @@ async function postAgentResponses(
   // BEFORE posting. Parallel webhook invocations all reach here with 0 comments,
   // but by the time the slowest one finishes, the faster one has started posting.
   const lateComments = await getIssueComments(issueNumber);
-  const agentAlreadyPosted = lateComments.some(c => isAgentComment(c.body));
+  const guardHeader = lateGuardHeader ?? AGENT_HEADERS[0];
+  const agentAlreadyPosted = lateGuardHeader
+    ? lateComments.some(c => c.body.trimStart().startsWith(lateGuardHeader))
+    : lateComments.some(c => isAgentComment(c.body));
+
   if (agentAlreadyPosted) {
-    console.log(`[dispatch] Issue #${issueNumber} — late guard: agent comment already exists, skipping`);
+    console.log(`[dispatch] Issue #${issueNumber} — late guard triggered, skipping`);
     return;
   }
 
@@ -115,7 +192,8 @@ async function postAgentResponses(
 
 /**
  * Called when a new issue is opened with the `proposed` label.
- * All six agents weigh in; label transitions proposed → debating.
+ * All six agents weigh in (Round 1); PM synthesizes; round-1-done label added.
+ * Label transitions: proposed → debating
  */
 export async function handleNewProposal(issue: GitHubIssue): Promise<void> {
   // Use the label transition as a distributed lock — do it FIRST before calling
@@ -134,14 +212,71 @@ export async function handleNewProposal(issue: GitHubIssue): Promise<void> {
 
   // Guard against duplicate runs: if there are already agent comments, skip
   const existingComments = await getIssueComments(issue.number);
-  if (existingComments.length > 0) {
-    console.log(`[dispatch] Issue #${issue.number} already has ${existingComments.length} comments — skipping`);
+  if (existingComments.some(c => isAgentComment(c.body))) {
+    console.log(`[dispatch] Issue #${issue.number} already has agent comments — skipping`);
     return;
   }
 
-  console.log(`[dispatch] New proposal: #${issue.number} "${issue.title}"`);
-  const prompt = buildProposalPrompt(issue);
-  await postAgentResponses(issue.number, prompt);
+  console.log(`[dispatch] New proposal: #${issue.number} "${issue.title}" — Round 1`);
+
+  // ── Round 1: all six agents respond ──────────────────────────────────────
+  const round1Prompt = buildProposalPrompt(issue);
+  await postAgentResponses(issue.number, round1Prompt);
+
+  // ── PM synthesis: frame Round 2 question ─────────────────────────────────
+  // Re-fetch comments to include what was just posted
+  const round1Comments = await getIssueComments(issue.number);
+  const pmRound1Prompt = buildPMRound1Prompt(issue, round1Comments);
+  console.log(`[dispatch] PM synthesizing Round 1 for issue #${issue.number}…`);
+  const pmSynthesis = await callAgent(PM_AGENT, pmRound1Prompt);
+  await postComment(issue.number, pmSynthesis);
+
+  // ── Signal Round 2 via label ─────────────────────────────────────────────
+  await addLabel(issue.number, 'round-1-done');
+  console.log(`[dispatch] Issue #${issue.number} — round-1-done label added`);
+}
+
+/**
+ * Called when the `round-1-done` label is added to a debating issue.
+ * All six agents respond to Round 2; PM calls preliminary verdict.
+ * Label transitions: round-1-done → round-2-done
+ */
+export async function handleRound2(issue: GitHubIssue): Promise<void> {
+  // Idempotency guard: only proceed if round-2-done is NOT already set
+  const freshIssue = await getIssue(issue.number);
+  const currentLabels = freshIssue.labels.map(l => l.name);
+  if (currentLabels.includes('round-2-done')) {
+    console.log(`[dispatch] Issue #${issue.number} — round-2-done already set, skipping`);
+    return;
+  }
+
+  // Check if Round 2 comments already exist (PM Round 1 header is the sentinel)
+  const existingComments = await getIssueComments(issue.number);
+  const pmHeader = '**📋 Product Manager**';
+  const pmCommentCount = existingComments.filter(c => c.body.trimStart().startsWith(pmHeader)).length;
+  if (pmCommentCount >= 2) {
+    // Two PM comments means Round 2 already ran
+    console.log(`[dispatch] Issue #${issue.number} — Round 2 already ran (${pmCommentCount} PM comments), skipping`);
+    return;
+  }
+
+  console.log(`[dispatch] Round 2 starting for issue #${issue.number}`);
+
+  // ── Round 2: all six agents respond seeing the full thread ────────────────
+  const allComments = await getIssueComments(issue.number);
+  const round2Prompt = buildRound2AgentPrompt(issue, allComments);
+  await postAgentResponses(issue.number, round2Prompt, AGENTS, `**${AGENTS[0].emoji} ${AGENTS[0].name}**`);
+
+  // ── PM Round 2 synthesis: call preliminary verdict ────────────────────────
+  const fullComments = await getIssueComments(issue.number);
+  const pmRound2Prompt = buildPMRound2Prompt(issue, fullComments);
+  console.log(`[dispatch] PM calling preliminary verdict for issue #${issue.number}…`);
+  const pmVerdict = await callAgent(PM_AGENT, pmRound2Prompt);
+  await postComment(issue.number, pmVerdict);
+
+  // ── Signal Round 2 complete ───────────────────────────────────────────────
+  await addLabel(issue.number, 'round-2-done');
+  console.log(`[dispatch] Issue #${issue.number} — round-2-done label added`);
 }
 
 /**
@@ -197,6 +332,7 @@ const AGENT_HEADERS = [
   '**🔬 SFI Fellow**',
   '**🧬 Evolutionary Biologist**',
   '**🤝 Consensus Agent**',
+  '**📋 Product Manager**',
 ];
 
 export function isAgentComment(body: string): boolean {

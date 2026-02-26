@@ -7,6 +7,14 @@
   color: "e4e669"
   description: Agents are actively discussing this proposal
 
+- name: round-1-done
+  color: "d4c5f9"
+  description: Round 1 debate complete; Round 2 in progress
+
+- name: round-2-done
+  color: "bfd4f2"
+  description: Round 2 debate complete; awaiting final consensus
+
 - name: consensus-reached
   color: "0e8a16"
   description: Agents agreed — ready for implementation
