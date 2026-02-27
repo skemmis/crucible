@@ -421,16 +421,18 @@ export async function handleDiscussionRequest(
   await addLabel(issue.number, 'needs-more-discussion');
 
   // Idempotency guard: check whether Round 3 agents have already posted
-  // since the last PM comment (prevents duplicate webhook invocations from
-  // double-processing the same /discuss event).
+  // since the LAST /discuss command. We pivot on the /discuss comment rather
+  // than the last PM, because handleFollowUp can post agent comments after
+  // the PM which would incorrectly trip a PM-based guard.
   const existingComments = await getIssueComments(issue.number);
-  const pmHeader = '**📋 Product Manager**';
-  const lastPmIdx = existingComments.reduce(
-    (last, c, i) => (c.body.trimStart().startsWith(pmHeader) ? i : last),
+  const lastDiscussIdx = existingComments.reduce(
+    (last, c, i) =>
+      !isAgentComment(c.body) && /\/discuss(?:ion)?/i.test(c.body) ? i : last,
     -1,
   );
-  const commentsAfterLastPM = existingComments.slice(lastPmIdx + 1);
-  if (commentsAfterLastPM.some(c => isAgentComment(c.body))) {
+  const commentsAfterDiscuss =
+    lastDiscussIdx >= 0 ? existingComments.slice(lastDiscussIdx + 1) : [];
+  if (commentsAfterDiscuss.some(c => isAgentComment(c.body))) {
     console.log(`[dispatch] Issue #${issue.number} — Round 3 already posted for this /discuss, skipping`);
     return;
   }
