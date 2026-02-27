@@ -214,24 +214,52 @@ async function main(): Promise<void> {
   );
 
   console.log(`[implement] Calling Claude to generate implementation…`);
-  // Use streaming — the SDK requires it when max_tokens is large enough that
-  // the request could exceed the 10-minute non-streaming timeout threshold.
-  const stream = client.messages.stream({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 32000,
-    thinking: { type: 'enabled', budget_tokens: 8000 } as any,
-    messages: [{ role: 'user', content: prompt }],
-  });
 
-  // Stream to stdout so GitHub Actions logs show live progress
-  stream.on('text', (text) => process.stdout.write(text));
-  const message = await stream.finalMessage();
+  // Retry up to 3 times on transient network errors (e.g. ERR_STREAM_PREMATURE_CLOSE).
+  let responseText = '';
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      if (attempt > 1) {
+        const wait = attempt * 10_000;
+        console.log(`[implement] Attempt ${attempt}/${MAX_ATTEMPTS} — waiting ${wait / 1000}s…`);
+        await new Promise(r => setTimeout(r, wait));
+      }
 
-  const textBlock = message.content.find(b => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('No text block in Claude response');
+      // Use streaming — the SDK requires it when max_tokens is large enough that
+      // the request could exceed the 10-minute non-streaming timeout threshold.
+      const stream = client.messages.stream({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 32000,
+        thinking: { type: 'enabled', budget_tokens: 8000 } as any,
+        messages: [{ role: 'user', content: prompt }],
+      });
+
+      // Stream to stdout so GitHub Actions logs show live progress
+      stream.on('text', (text) => process.stdout.write(text));
+      const message = await stream.finalMessage();
+
+      const textBlock = message.content.find(b => b.type === 'text');
+      if (!textBlock || textBlock.type !== 'text') {
+        throw new Error('No text block in Claude response');
+      }
+      responseText = textBlock.text;
+      break; // success — exit retry loop
+
+    } catch (err: any) {
+      const isTransient =
+        err?.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+        err?.cause?.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+        err?.message?.includes('Premature close') ||
+        err?.status === 529 || // overloaded
+        err?.status === 503;
+      if (isTransient && attempt < MAX_ATTEMPTS) {
+        console.warn(`[implement] Transient error on attempt ${attempt}: ${err.message}`);
+      } else {
+        throw err; // non-transient or out of retries
+      }
+    }
   }
-  const responseText = textBlock.text;
   console.log(`\n[implement] Response length: ${responseText.length} chars`);
   console.log(`[implement] Has IMPLEMENTATION_START: ${responseText.includes('IMPLEMENTATION_START')}`);
   console.log(`[implement] Has IMPLEMENTATION_END: ${responseText.includes('IMPLEMENTATION_END')}`);
