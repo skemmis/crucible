@@ -52,8 +52,17 @@ export interface SpringGene {
  *      |                               |         | currently is.
  * 13   | Ground contact fraction       | [0, 1]  | groundContactNodes / totalNodes.
  *      |                               |         | Tells the brain how many feet are planted.
+ * 14   | Terrain slope ahead (tanh)   | [-1, 1] | heightAt(pos + vel*25) - heightAt(pos),
+ *      |                               |         | tanh-scaled by 0.1. Positive = uphill.
+ * 15   | Terrain elevation            | [0, 1]  | heightAt(pos) / maxTerrainHeight.
+ *      |                               |         | Tells agent how high on the terrain it sits.
+ * 16   | Nearest agent direction X    | [-1, 1] | tanh-normalised direction to nearest live
+ *      |                               |         | other agent (0 if none nearby).
+ * 17   | Nearest agent direction Z    | [-1, 1] | tanh-normalised direction to nearest live
+ *      |                               |         | other agent (0 if none nearby).
+ * 18   | Nearest agent distance       | [0, 1]  | tanh(dist / 150). 0 = on top of it.
  */
-export const SENSOR_COUNT = 14;
+export const SENSOR_COUNT = 19;
 
 /** Distance at which wall-proximity sensor saturates (world units). */
 export const WALL_SENSE_RADIUS = 200;

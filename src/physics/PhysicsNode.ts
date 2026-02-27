@@ -26,6 +26,14 @@ export class PhysicsNode {
    */
   interAgentImpulse: number = 0;
 
+  /**
+   * Downward speed (units/frame) at the moment this node last struck terrain.
+   * Set by constrainToGround() when the node was below the surface and moving
+   * downward; 0 when the node is airborne or landed softly.
+   * Agent.update() reads this to implement fall-death.
+   */
+  landingVel: number = 0;
+
   constructor(
     x: number,
     y: number,
@@ -73,10 +81,16 @@ export class PhysicsNode {
       const velY = this.pos.y - this.prevPos.y;
       const velZ = this.pos.z - this.prevPos.z;
 
+      // Capture downward impact speed for fall-damage accounting.
+      // velY < 0 means the node was moving downward when it struck terrain.
+      this.landingVel = velY < 0 ? -velY : 0;
+
       this.pos.y = minY;
       this.prevPos.y = this.pos.y + velY * restitution;    // bounce
       this.prevPos.x = this.pos.x - velX * (1 - friction); // XZ friction
       this.prevPos.z = this.pos.z - velZ * (1 - friction);
+    } else {
+      this.landingVel = 0; // airborne or resting — no impact this frame
     }
   }
 

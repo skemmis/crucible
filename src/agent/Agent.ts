@@ -142,6 +142,7 @@ export class Agent {
     worldWidth: number,
     worldDepth: number,
     heightfield: Heightfield,
+    allAgents: Agent[],
   ): number[] {
     const c = this.centerPos;
 
@@ -228,7 +229,46 @@ export class Agent {
       ? groundContactCount / this.nodes.length
       : 0;
 
-    // ── Assemble input vector (must match SENSOR_COUNT = 14) ─────────────────
+    // ── Terrain sensing ───────────────────────────────────────────────────────
+    // Slope ahead: compare terrain height at (pos + velocity*25) vs current pos.
+    // Positive = heading uphill, negative = heading downhill.
+    // Velocity direction is normalised by speed to give a consistent lookahead.
+    const speed = Math.sqrt(velX * velX + velZ * velZ) + 1e-6;
+    const lookahead = 25;
+    const lookX = c.x + (velX / speed) * lookahead;
+    const lookZ = c.z + (velZ / speed) * lookahead;
+    const hCur  = heightfield.heightAt(c.x, c.z);
+    const hAhead = heightfield.heightAt(
+      Math.max(0, Math.min(worldWidth,  lookX)),
+      Math.max(0, Math.min(worldDepth, lookZ)),
+    );
+    const terrainSlopeAhead = Math.tanh((hAhead - hCur) * 0.1);
+
+    // Current terrain elevation: how high the ground is at the agent's position,
+    // normalised by the maximum possible terrain height.
+    const terrainElevation = heightfield.maxHeight > 0
+      ? Math.min(1, hCur / heightfield.maxHeight)
+      : 0;
+
+    // ── Nearest other-agent sensing ───────────────────────────────────────────
+    let nearAgentDirX = 0, nearAgentDirZ = 0, nearAgentDist = 1;
+    let minAgentDist = Infinity;
+    for (const other of allAgents) {
+      if (other.dead || other.id === this.id) continue;
+      const oc = other.centerPos;
+      const adx = oc.x - c.x;
+      const adz = oc.z - c.z;
+      const adist = Math.sqrt(adx * adx + adz * adz);
+      if (adist < minAgentDist) {
+        minAgentDist = adist;
+        const inv = 1 / (adist + 1e-6);
+        nearAgentDirX = Math.tanh(adx * inv * 5);
+        nearAgentDirZ = Math.tanh(adz * inv * 5);
+        nearAgentDist = Math.tanh(adist / 150);
+      }
+    }
+
+    // ── Assemble input vector (must match SENSOR_COUNT = 19) ─────────────────
     // Slot indices are the authoritative layout — see Genome.ts for the table.
     return [
       /* 0  */ Math.min(1, this.energy / 250),               // own energy
@@ -245,6 +285,11 @@ export class Agent {
       /* 11 */ wallProxZ,                                     // wall proximity Z
       /* 12 */ stretchSensor,                                 // proprioception: body activation
       /* 13 */ groundContactFraction,                         // proprioception: feet planted
+      /* 14 */ terrainSlopeAhead,                             // terrain: uphill/downhill ahead
+      /* 15 */ terrainElevation,                              // terrain: current elevation
+      /* 16 */ nearAgentDirX,                                 // nearest agent dir X
+      /* 17 */ nearAgentDirZ,                                 // nearest agent dir Z
+      /* 18 */ nearAgentDist,                                 // nearest agent distance
     ];
   }
 
@@ -256,12 +301,13 @@ export class Agent {
     worldWidth: number,
     worldDepth: number,
     heightfield: Heightfield,
+    allAgents: Agent[] = [],
   ): void {
     this.age += dt;
     this.phase += dt * (2.5 + Math.sin(this.phase * 0.3) * 0.5);
 
     // Brain → muscle activations
-    const inputs = this._sense(zones, worldWidth, worldDepth, heightfield);
+    const inputs = this._sense(zones, worldWidth, worldDepth, heightfield, allAgents);
     const outputs = this.genome.brain.forward(inputs);
     for (let i = 0; i < this.muscles.length; i++) {
       this.muscles[i].activation = outputs[i % outputs.length];
@@ -286,6 +332,23 @@ export class Agent {
       const groundY = heightfield.heightAt(n.pos.x, n.pos.z);
       n.constrainToGround(groundY, 0.35, 0.15);
       n.constrainToWorldBounds(0, worldWidth, 0, worldDepth);
+    }
+
+    // Fall death: if any node struck terrain with enough downward speed, the
+    // agent dies from the impact.  Threshold calibration (at 60 fps):
+    //   acc_per_frame = G × dt² = 600 / 3600 ≈ 0.167 vel-units added/frame
+    //   impact speed after falling H units ≈ 0.578 × √H
+    //   H = 40  → ~3.7 units/frame  (lethal at threshold 3.5)
+    //   H = 25  → ~2.9 units/frame  (safe at threshold 3.5)
+    //   H = 60  → ~4.5 units/frame  (lethal)
+    // With terrain amplitude 60, this means falls from significant terrain
+    // features are lethal while small hops during locomotion are safe.
+    const FALL_DEATH_VEL = 3.5;
+    for (const n of this.nodes) {
+      if (n.landingVel > FALL_DEATH_VEL) {
+        this.dead = true;
+        break;
+      }
     }
 
     // Energy accounting

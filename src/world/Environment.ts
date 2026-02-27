@@ -60,15 +60,22 @@ export class Environment {
     readonly worldWidth: number,
     readonly worldDepth: number,
     zoneCount: number = 12,
+    /**
+     * Optional terrain-height query used to place ground-tier (tier 0) food
+     * zones ON the terrain surface rather than at absolute Y=0.  When terrain
+     * amplitude is large (≥40) zones at Y=0 would be buried underground on
+     * hills; floating them on the terrain keeps them reachable from ground level.
+     */
+    groundHeightAt?: (x: number, z: number) => number,
   ) {
-    this._seed(zoneCount);
+    this._seed(zoneCount, groundHeightAt);
   }
 
-  private _seed(count: number): void {
+  private _seed(count: number, groundHeightAt?: (x: number, z: number) => number): void {
     const perTier = Math.floor(count / 3);
     const tiers: Array<{
-      y: number;
       tier: 0 | 1 | 2;
+      fixedY: number | null; // null = use terrain height (ground tier)
       radiusMin: number;
       radiusMax: number;
       energyMin: number;
@@ -77,23 +84,24 @@ export class Environment {
       replenishMax: number;
     }> = [
       // Ground — plentiful, easy; radius shrunk so patches support 1–2 agents,
-      // not entire clusters.  Smaller radius forces movement between patches.
+      // not entire clusters.  Y is placed on the terrain surface (not fixed Y=0)
+      // so that zones remain reachable when terrain amplitude is large.
       {
-        y: 0, tier: 0,
+        tier: 0, fixedY: null,
         radiusMin: 20, radiusMax: 28,
         energyMin: 60, energyMax: 90,
         replenishMin: 1.5, replenishMax: 3.0,
       },
       // Mid — richer, requires height
       {
-        y: 60, tier: 1,
+        tier: 1, fixedY: 60,
         radiusMin: 14, radiusMax: 20,
         energyMin: 90, energyMax: 140,
         replenishMin: 1.0, replenishMax: 2.0,
       },
       // High — richest, truly out of reach until evolved
       {
-        y: 140, tier: 2,
+        tier: 2, fixedY: 140,
         radiusMin: 8, radiusMax: 14,
         energyMin: 130, energyMax: 200,
         replenishMin: 0.7, replenishMax: 1.5,
@@ -102,12 +110,17 @@ export class Environment {
 
     for (const td of tiers) {
       for (let i = 0; i < perTier; i++) {
+        const x = 60 + Math.random() * (this.worldWidth - 120);
+        const z = 60 + Math.random() * (this.worldDepth - 120);
+        // Ground-tier zones float on the terrain surface; upper tiers are fixed.
+        const y = td.fixedY !== null
+          ? td.fixedY
+          : (groundHeightAt ? groundHeightAt(x, z) : 0);
         const maxE = td.energyMin + Math.random() * (td.energyMax - td.energyMin);
         this.zones.push({
-          // Scatter independently across XZ for each tier
-          x: 60 + Math.random() * (this.worldWidth - 120),
-          y: td.y,
-          z: 60 + Math.random() * (this.worldDepth - 120),
+          x,
+          y,
+          z,
           radius: td.radiusMin + Math.random() * (td.radiusMax - td.radiusMin),
           energy: maxE,
           maxEnergy: maxE,

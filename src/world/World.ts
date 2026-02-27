@@ -23,7 +23,7 @@ export const DEFAULT_CONFIG: WorldConfig = {
   maxAgents: 60,
   zoneCount: 24,   // increased from 12 → 24 to distribute agents and reduce bottlenecking
   heightfieldResolution: 64,
-  heightfieldAmplitude: 28,
+  heightfieldAmplitude: 60,
 };
 
 // ── Telemetry types ────────────────────────────────────────────────────────────
@@ -419,14 +419,19 @@ export class World {
     this.worldWidth = cfg.worldWidth;
     this.worldDepth = cfg.worldDepth;
     this.maxAgents = cfg.maxAgents;
-    this.env = new Environment(cfg.worldWidth, cfg.worldDepth, cfg.zoneCount);
-
-    // Bake heightfield once — static for the entire simulation run
+    // Heightfield must be baked first — Environment uses it to place ground zones.
     this.heightfield = new Heightfield(
       cfg.worldWidth,
       cfg.worldDepth,
       cfg.heightfieldResolution ?? 64,
-      cfg.heightfieldAmplitude ?? 28,
+      cfg.heightfieldAmplitude ?? 60,
+    );
+
+    this.env = new Environment(
+      cfg.worldWidth,
+      cfg.worldDepth,
+      cfg.zoneCount,
+      (x, z) => this.heightfield.heightAt(x, z),
     );
 
     this._seedInitialPopulation(cfg.initialAgents);
@@ -690,7 +695,7 @@ export class World {
         continue;
       }
 
-      agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield);
+      agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield, this.agents);
 
       if (agent.dead) {
         // Agent died from starvation (energy → 0 inside agent.update()).
