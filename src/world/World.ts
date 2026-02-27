@@ -487,6 +487,24 @@ export class World {
   }
 
   /**
+   * Return the live agent with the lowest energy, excluding the given id.
+   * Used for competitive displacement: when a fit agent reproduces into a
+   * full world, the weakest incumbent is evicted to make room.
+   */
+  private _weakestLiveAgent(excludeId: string): Agent | null {
+    let weakest: Agent | null = null;
+    let minEnergy = Infinity;
+    for (const a of this.agents) {
+      if (a.dead || a.id === excludeId) continue;
+      if (a.energy < minEnergy) {
+        minEnergy = a.energy;
+        weakest = a;
+      }
+    }
+    return weakest;
+  }
+
+  /**
    * Apply local kin-selection cooperative energy transfer.
    *
    * For each live pair of agents within KINSHIP_INTERACT_RADIUS (XZ plane),
@@ -628,7 +646,8 @@ export class World {
       if (agent.dead) continue;
 
       // Max lifespan: forces generational turnover.
-      if (agent.age > 180) {
+      // 60s (down from 180s) tightens the selection cycle ~3×.
+      if (agent.age > 60) {
         this._depositCorpse(agent);
         agent.dead = true;
         liveCount--;
@@ -656,12 +675,40 @@ export class World {
       }
       this._frameEnergyGained.set(agent.id, frameGained);
 
-      // Reproduction
-      if (agent.canReproduce() && liveCount + offspring.length < this.maxAgents) {
-        const child = agent.reproduce();
-        offspring.push(child);
-        this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
-        this.telemetry.recordBirth();
+      // Energy decay: surplus above 200 bleeds off at 3 % per second.
+      // Prevents passive hoarding — a sitter capped at 300 loses 3 energy/s
+      // of surplus, so staying well-fed requires ongoing harvesting rather
+      // than a one-time fill.
+      if (agent.energy > 200) {
+        agent.energy -= (agent.energy - 200) * 0.03 * dt;
+      }
+
+      // Reproduction — competitive displacement when at capacity.
+      // If there is a free slot, birth normally.  If the world is full,
+      // kill the weakest live agent to make room — energy directly translates
+      // to survival rather than the arbitrary lifespan timer being the only
+      // selection pressure.
+      if (agent.canReproduce()) {
+        if (liveCount + offspring.length < this.maxAgents) {
+          const child = agent.reproduce();
+          offspring.push(child);
+          this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
+          this.telemetry.recordBirth();
+          // liveCount unchanged: no existing agent died
+        } else {
+          const victim = this._weakestLiveAgent(agent.id);
+          if (victim) {
+            this._depositCorpse(victim);
+            victim.dead = true;
+            liveCount--;
+            this.telemetry.recordDeath();
+            const child = agent.reproduce();
+            offspring.push(child);
+            this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
+            this.telemetry.recordBirth();
+            // liveCount net change: -1 death +1 birth = 0
+          }
+        }
       }
     }
 

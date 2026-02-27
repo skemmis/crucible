@@ -76,26 +76,27 @@ export class Environment {
       replenishMin: number;
       replenishMax: number;
     }> = [
-      // Ground — plentiful, easy
+      // Ground — plentiful, easy; radius shrunk so patches support 1–2 agents,
+      // not entire clusters.  Smaller radius forces movement between patches.
       {
         y: 0, tier: 0,
-        radiusMin: 60, radiusMax: 90,
-        energyMin: 80, energyMax: 120,
-        replenishMin: 2.0, replenishMax: 4.0,
+        radiusMin: 20, radiusMax: 28,
+        energyMin: 60, energyMax: 90,
+        replenishMin: 1.5, replenishMax: 3.0,
       },
       // Mid — richer, requires height
       {
         y: 60, tier: 1,
-        radiusMin: 40, radiusMax: 60,
-        energyMin: 120, energyMax: 180,
-        replenishMin: 1.5, replenishMax: 3.0,
+        radiusMin: 14, radiusMax: 20,
+        energyMin: 90, energyMax: 140,
+        replenishMin: 1.0, replenishMax: 2.0,
       },
       // High — richest, truly out of reach until evolved
       {
         y: 140, tier: 2,
-        radiusMin: 22, radiusMax: 35,
-        energyMin: 180, energyMax: 260,
-        replenishMin: 1.0, replenishMax: 2.5,
+        radiusMin: 8, radiusMax: 14,
+        energyMin: 130, energyMax: 200,
+        replenishMin: 0.7, replenishMax: 1.5,
       },
     ];
 
