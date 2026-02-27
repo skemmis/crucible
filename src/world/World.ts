@@ -1,7 +1,8 @@
 import { Agent } from '../agent/Agent';
-import { Genome } from '../agent/Genome';
+import { Genome, ArchetypeName } from '../agent/Genome';
 import { Environment } from './Environment';
 import { Heightfield } from './Heightfield';
+import { SpatialHash, COLLISION_CELL_SIZE } from './SpatialHash';
 
 export interface WorldConfig {
   worldWidth: number;
@@ -177,6 +178,34 @@ const KINSHIP_THRESHOLD = 0.25;
  *   transfer = 100 × 0.04 × kinship ≤ 4 units/tick  (bounded by kinship < 1)
  */
 const KINSHIP_TRANSFER_RATE = 0.04;
+
+// ── Inter-agent collision constants ───────────────────────────────────────────
+
+/**
+ * Stiffness of the repulsion force applied when nodes from different agents
+ * overlap.  Kept lower than intra-agent spring stiffness (150–550) to avoid
+ * violent impulses when agents collide at speed.
+ *
+ * Value chosen so a head-on overlap of one full node radius (≈ 6 units)
+ * produces a force comparable to a mid-stiffness muscle spring.
+ */
+const INTER_AGENT_REPULSION_STIFFNESS = 120;
+
+// ── Archetype seeding constants ───────────────────────────────────────────────
+
+/**
+ * Fraction of generation-0 agents that are seeded from archetypes.
+ * The rest are random as before so morphospace exploration isn't fully
+ * constrained to archetype basins from the start.
+ *
+ * With DEFAULT_CONFIG.initialAgents = 16:
+ *   floor(16 × 0.625) = 10 archetype agents
+ *   6 random agents
+ *
+ * The archetypes are drawn round-robin across the three types so each
+ * type is represented roughly equally.
+ */
+const ARCHETYPE_SEED_FRACTION = 0.625;
 
 // ── Telemetry tracker (lives inside World, updated each step) ─────────────────
 
@@ -378,6 +407,13 @@ export class World {
   // Used to compute energy-acquisition variance for the crowding diagnostic
   private _frameEnergyGained: Map<number, number> = new Map();
 
+  /**
+   * Reusable spatial hash for inter-agent collision broad phase.
+   * Rebuilt each frame — clear() + insert is O(total_nodes).
+   * Cell size: see SpatialHash.ts for tuning notes.
+   */
+  private _collisionHash: SpatialHash = new SpatialHash(COLLISION_CELL_SIZE);
+
   constructor(cfg: WorldConfig) {
     this.config = cfg;
     this.worldWidth = cfg.worldWidth;
@@ -393,7 +429,29 @@ export class World {
       cfg.heightfieldAmplitude ?? 28,
     );
 
-    for (let i = 0; i < cfg.initialAgents; i++) {
+    this._seedInitialPopulation(cfg.initialAgents);
+  }
+
+  /**
+   * Seed the generation-0 population with a mix of archetype genomes and
+   * random genomes.  Archetypes are guaranteed to have functional body plans
+   * that can locomote; random genomes fill the remainder to preserve
+   * morphospace exploration.
+   *
+   * Archetype fraction: ARCHETYPE_SEED_FRACTION of initialAgents, rounded down.
+   * The archetypes cycle round-robin across worm / quad / tripod so each type
+   * is seeded at roughly equal frequency.
+   */
+  private _seedInitialPopulation(count: number): void {
+    const archetypeCount = Math.floor(count * ARCHETYPE_SEED_FRACTION);
+    const archetypeNames: ArchetypeName[] = ['worm', 'quad', 'tripod'];
+
+    for (let i = 0; i < archetypeCount; i++) {
+      const name = archetypeNames[i % archetypeNames.length];
+      this._spawn(Genome.archetype(name));
+    }
+
+    for (let i = archetypeCount; i < count; i++) {
       this._spawn(Genome.random());
     }
   }
@@ -418,7 +476,7 @@ export class World {
   }
 
   /**
-   * Deposit a corpse depot for a dying agent if it has meaningful energy.
+   * Deposit a corpse energy depot for a dying agent if it has meaningful energy.
    * The corpse is placed at ground level directly below the agent's centre
    * so that ground-level scavengers can reach it without needing height.
    */
@@ -438,12 +496,6 @@ export class World {
    *
    * Complexity: O(n²) in agent count, but n ≤ maxAgents (60) so the worst case
    * is ~1 800 pairwise checks per tick — negligible vs. physics.
-   *
-   * Emergent effect: kin clusters form naturally, since offspring that stay near
-   * their parent and siblings receive an energy subsidy.  Unrelated lineages
-   * that wander into the same patch do not receive this benefit, creating
-   * implicit competitive exclusion between lineages without any explicit
-   * aggression mechanic.
    */
   private _applyKinshipInteractions(): void {
     const n = this.agents.length;
@@ -459,31 +511,102 @@ export class World {
         const b = this.agents[j];
         const cb = b.centerPos;
 
-        // Fast XZ spatial cull — Y is usually small relative to XZ distances
         const dx = ca.x - cb.x;
         const dz = ca.z - cb.z;
         if (dx * dx + dz * dz > radiusSq) continue;
 
-        // Genome kinship — O(1) (fixed small number of marker nodes)
         const k = Genome.kinship(a.genome, b.genome);
         if (k < KINSHIP_THRESHOLD) continue;
 
-        // Cooperative energy equalisation: richer kin gives to poorer kin.
-        // Transfer is proportional to kinship score so close relatives share
-        // more readily than distant ones.
         const diff = a.energy - b.energy;
-        if (Math.abs(diff) < 1) continue; // no meaningful difference
+        if (Math.abs(diff) < 1) continue;
 
         const transfer = diff * k * KINSHIP_TRANSFER_RATE;
         a.energy -= transfer;
         b.energy += transfer;
 
-        // Clamp to legal bounds (shouldn't normally be needed, but guards
-        // against numerical edge cases with very large energy differences)
         if (a.energy < 0) { b.energy += a.energy; a.energy = 0; }
         if (b.energy < 0) { a.energy += b.energy; b.energy = 0; }
         a.energy = Math.min(300, a.energy);
         b.energy = Math.min(300, b.energy);
+      }
+    }
+  }
+
+  /**
+   * Apply sphere-sphere repulsion between nodes belonging to *different* agents.
+   *
+   * Uses a spatial hash for the broad phase so the effective cost is O(n × k)
+   * where k is the average number of nodes per hash cell (typically 1–3 at
+   * target densities) rather than O(n²) over all node pairs.
+   *
+   * Physics: when two nodes from different agents overlap (distance < r_a + r_b),
+   * a linear repulsion force is applied along the separation axis — identical
+   * in form to a zero-rest-length spring.  This pushes agents out of each other
+   * without any attraction, creating clean physical exclusion.
+   *
+   * Energy is not deducted for inter-agent repulsion (it is a contact normal
+   * force, not a metabolic cost).
+   */
+  private _applyInterAgentCollision(): void {
+    if (this.agents.length < 2) return;
+
+    // ── Build spatial hash ────────────────────────────────────────────────────
+    this._collisionHash.clear();
+    for (const agent of this.agents) {
+      for (const node of agent.nodes) {
+        this._collisionHash.insert(node, agent.id);
+      }
+    }
+
+    // ── Narrow phase: repulsion ───────────────────────────────────────────────
+    for (const agent of this.agents) {
+      for (const nodeA of agent.nodes) {
+        // Query radius = max possible sum of two node radii.
+        // Node radii range ~4–9 so 18 is a safe upper bound for the query.
+        const queryR = 18;
+        const candidates = this._collisionHash.query(nodeA.pos.x, nodeA.pos.z, queryR);
+
+        for (const { node: nodeB, agentId: bId } of candidates) {
+          // Only collide nodes from different agents
+          if (bId === agent.id) continue;
+          // Avoid double-counting: only process pair once (lower agent id acts)
+          // We can't easily enforce this with the hash, so we apply half-force
+          // to each side (Newton's third law is satisfied by symmetry).
+
+          const dx = nodeB.pos.x - nodeA.pos.x;
+          const dy = nodeB.pos.y - nodeA.pos.y;
+          const dz = nodeB.pos.z - nodeA.pos.z;
+          const distSq = dx * dx + dy * dy + dz * dz;
+          const minDist = nodeA.radius + nodeB.radius;
+
+          if (distSq >= minDist * minDist || distSq < 1e-9) continue;
+
+          const dist = Math.sqrt(distSq);
+          const overlap = minDist - dist;
+          const invDist = 1 / dist;
+
+          // Repulsion magnitude proportional to overlap (linear spring, zero rest length)
+          const forceMag = overlap * INTER_AGENT_REPULSION_STIFFNESS;
+
+          // Normalised separation axis (A → B direction = push B away from A)
+          const nx = dx * invDist;
+          const ny = dy * invDist;
+          const nz = dz * invDist;
+
+          // Apply equal and opposite forces.
+          // Half to each side so we don't double-apply when we encounter the
+          // symmetric pair (nodeB's agent will also process this pair).
+          const halfF = forceMag * 0.5;
+
+          nodeA.acc.x -= (halfF * nx) / nodeA.mass;
+          nodeA.acc.y -= (halfF * ny) / nodeA.mass;
+          nodeA.acc.z -= (halfF * nz) / nodeA.mass;
+
+          nodeB.acc.x += (halfF * nx) / nodeB.mass;
+          nodeB.acc.y += (halfF * ny) / nodeB.mass;
+          nodeB.acc.z += (halfF * nz) / nodeB.mass;
+        }
       }
     }
   }
@@ -505,7 +628,6 @@ export class World {
       if (agent.dead) continue;
 
       // Max lifespan: forces generational turnover.
-      // Deposit a corpse — old agents may still have significant energy.
       if (agent.age > 180) {
         this._depositCorpse(agent);
         agent.dead = true;
@@ -516,8 +638,6 @@ export class World {
 
       agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield);
 
-      // Energy-starvation death: agent.energy hit 0 inside update().
-      // Nothing to deposit (energy ≤ 0), but we still record the death.
       if (agent.dead) {
         liveCount--;
         this.telemetry.recordDeath();
@@ -548,7 +668,8 @@ export class World {
     this.agents = this.agents.filter(a => !a.dead);
     this.agents.push(...offspring);
 
-    // Reseed if population crashes
+    // Reseed if population crashes — use random genomes only (not archetypes)
+    // so post-crash recovery can explore novel morphologies.
     if (this.agents.length < 4) {
       const toAdd = Math.min(6, this.maxAgents - this.agents.length);
       for (let i = 0; i < toAdd; i++) {
@@ -560,6 +681,16 @@ export class World {
     // Runs after all births/deaths are resolved so the live agent list is stable.
     this._applyKinshipInteractions();
 
+    // Inter-agent collision: sphere-sphere repulsion between nodes on different
+    // agents.  Runs after agent.update() (which accumulates spring forces and
+    // gravity) so collision repulsion is added on top of intra-agent forces,
+    // then integration happens inside each agent's own update call.
+    //
+    // NOTE: agent.update() integrates its own nodes, so inter-agent forces
+    // added here are applied *next* frame via accumulated acc.  This one-frame
+    // lag is acceptable at 60 Hz and avoids restructuring the update loop.
+    this._applyInterAgentCollision();
+
     // Update rolling diversity history every frame (cheap: O(nk))
     const diversity = this._computeGenomeDiversity();
     this.telemetry.recordDiversity(diversity);
@@ -567,36 +698,22 @@ export class World {
 
   // ── Telemetry snapshot ────────────────────────────────────────────────────────
 
-  /**
-   * Capture a telemetry snapshot using only O(n) and O(nk) metrics.
-   * Safe to call off the render hot-path (e.g. from a setInterval).
-   * Pass a canvasDataUrl only when an anomaly has already been detected.
-   */
   captureSnapshot(canvasDataUrl?: string): TelemetrySnapshot {
     const n = this.agents.length;
 
-    // ── Metric 1: genome diversity (rolling centroid distance, O(nk)) ──────────
     const genomeDiversity = this._computeGenomeDiversity();
 
-    // ── Metric 2: birth/death ratio trend ─────────────────────────────────────
     const birthRate = this.telemetry.birthRate;
     const deathRate = this.telemetry.deathRate;
     const birthDeathRatio = deathRate < 1e-6 ? birthRate : birthRate / deathRate;
 
-    // ── Metric 3: diversity rate of change ────────────────────────────────────
     const diversityDelta = this.telemetry.diversityDeltaSinceLastSnapshot;
     this.telemetry.markSnapshotDiversity(genomeDiversity);
 
-    // ── Metric 4: spatial entropy (16×16 grid, O(n)) ──────────────────────────
     const spatialEntropy = this._computeSpatialEntropy();
-
-    // ── Metric 5: energy-acquisition variance ─────────────────────────────────
     const energyAcquisitionVariance = this._computeEnergyAcquisitionVariance();
-
-    // ── Metric 6: morphological variance by generation bucket ─────────────────
     const morphologicalVarianceByGeneration = this._computeMorphologicalVarianceByGeneration();
 
-    // ── Population basics (O(n)) ──────────────────────────────────────────────
     let meanEnergy = 0;
     for (const a of this.agents) meanEnergy += a.energy;
     if (n > 0) meanEnergy /= n;
@@ -605,11 +722,9 @@ export class World {
     for (const a of this.agents) variance += (a.energy - meanEnergy) ** 2;
     const stddevEnergy = n > 1 ? Math.sqrt(variance / n) : 0;
 
-    // ── maxGeneration (needed for both stats and complexity gates) ─────────────
     const gens = this.agents.map(a => a.generation);
     const maxGeneration = gens.length ? Math.max(...gens) : 0;
 
-    // ── Complexity score ───────────────────────────────────────────────────────
     const maxGenGrowing = this.telemetry.recordMaxGeneration(maxGeneration);
     const birthDeathInBand =
       birthDeathRatio >= BIRTH_DEATH_GATE_LO &&
@@ -632,10 +747,6 @@ export class World {
 
     if (subScores.gatesPassed) {
       const { diversityScore, stabilityScore, spatialScore, varianceScore, generationScore } = subScores;
-      // Geometric mean — clamp sub-scores away from absolute zero to avoid
-      // catastrophic collapse from a single near-zero sub-score.
-      // The consensus agreed zeros are "information" but we also log sub-scores
-      // individually, so we use a soft floor of 0.001 here.
       const FLOOR = 0.001;
       const product =
         Math.max(FLOOR, diversityScore) *
@@ -649,13 +760,11 @@ export class World {
       complexityScoreVariance = stats.variance;
       complexityScoreAutocorrelation = stats.autocorrelation;
     } else {
-      // Gates failed — retrieve stats from prior non-null scores (if any)
       const stats = this.telemetry.getScoreStats();
       complexityScoreVariance = stats.variance;
       complexityScoreAutocorrelation = stats.autocorrelation;
     }
 
-    // ── Anomaly detection ─────────────────────────────────────────────────────
     const anomalies: AnomalyFlag[] = [];
     const checks: Array<[string, number]> = [
       ['genomeDiversity', genomeDiversity],
@@ -700,10 +809,6 @@ export class World {
 
   // ── Complexity sub-scores ─────────────────────────────────────────────────────
 
-  /**
-   * Compute normalised [0,1] sub-scores from existing telemetry values.
-   * No new data collection — purely arithmetic on already-computed metrics.
-   */
   private _computeComplexitySubScores(
     genomeDiversity: number,
     diversityDelta: number,
@@ -716,32 +821,17 @@ export class World {
   ): ComplexitySubScores {
     const gatesPassed = birthDeathInBand && maxGenGrowing;
 
-    // ── diversityScore ────────────────────────────────────────────────────────
-    // High diversity that is *sustained* (not converging or exploding).
-    // genomeDiversity is in world-units (L2 of morphological feature vectors).
-    // Typical meaningful range: 0 – 150. We want high values, but also penalise
-    // large absolute rate-of-change (system in flux rather than sustaining).
-    const diversityMagnitude = 1 - Math.exp(-genomeDiversity / 50);  // [0,1], saturates ~150
-    const deltaStability = Math.exp(-Math.abs(diversityDelta) / 8);  // 1=flat, decays with delta
+    const diversityMagnitude = 1 - Math.exp(-genomeDiversity / 50);
+    const deltaStability = Math.exp(-Math.abs(diversityDelta) / 8);
     const diversityScore = diversityMagnitude * deltaStability;
 
-    // ── stabilityScore ────────────────────────────────────────────────────────
-    // Gaussian bell centred at birthDeathRatio = 1.0.
-    // Width chosen so the score is ~0.5 at the gate edges (0.85 / 1.15).
     const _t = (birthDeathRatio - 1.0) / 0.2;
     const stabilityScore = Math.exp(-(_t * _t));
 
-    // ── spatialScore ──────────────────────────────────────────────────────────
-    // Shannon entropy normalised by theoretical maximum (log2(GRID_SIZE²)).
     const spatialScore = Math.min(1, spatialEntropy / MAX_SPATIAL_ENTROPY);
 
-    // ── varianceScore ─────────────────────────────────────────────────────────
-    // energyAcquisitionVariance is in (energy units)², typical range 0–500.
-    // tanh normalisation with scale 100 → half-score at variance ≈ 100.
     const varianceScore = Math.tanh(energyAcquisitionVariance / 100);
 
-    // ── generationScore ───────────────────────────────────────────────────────
-    // Lineages persisting across time. Saturates around generation 30.
     const generationScore = Math.tanh(maxGeneration / 15);
 
     return {
@@ -756,13 +846,13 @@ export class World {
     };
   }
 
-  // ── Existing private metrics ──────────────────────────────────────────────────
+  // ── Private metrics ───────────────────────────────────────────────────────────
 
   private _computeGenomeDiversity(): number {
     const n = this.agents.length;
     if (n < 2) return 0;
 
-    const FEATURES_PER_NODE = 5; // dx, dy, dz, mass, radius
+    const FEATURES_PER_NODE = 5;
     const MAX_NODES = 7;
     const K = MAX_NODES * FEATURES_PER_NODE;
 
