@@ -130,14 +130,18 @@ export class Agent {
   // ── Sensing ──────────────────────────────────────────────────────────────────
 
   /**
-   * Build the 12-element sensor input vector.
+   * Build the 14-element sensor input vector.
    * Slot layout is defined in Genome.ts — this method is the single place where
    * world-state queries are assembled into that layout.
+   *
+   * Slots 0–11: world-state inputs (unchanged from prior layout).
+   * Slots 12–13: proprioceptive inputs (Proposal #43, Lever D).
    */
   private _sense(
     zones: EnergyZone[],
     worldWidth: number,
     worldDepth: number,
+    heightfield: Heightfield,
   ): number[] {
     const c = this.centerPos;
 
@@ -180,21 +184,67 @@ export class Agent {
     const wallProxX = Math.max(0, 1 - distToNearestWallX / WALL_SENSE_RADIUS);
     const wallProxZ = Math.max(0, 1 - distToNearestWallZ / WALL_SENSE_RADIUS);
 
-    // ── Assemble input vector (must match SENSOR_COUNT = 12) ─────────────────
+    // ── Proprioception: stretch sensor (slot 12) ──────────────────────────────
+    // Mean absolute deviation of actuated spring lengths from their rest lengths,
+    // expressed as a fraction of rest length, then tanh-scaled.
+    //
+    // Tells the brain how "activated" the body currently is — high values mean
+    // muscles are strongly contracted or extended relative to their natural state.
+    // Without this, all rhythm information comes from the global oscillator only.
+    //
+    // Normalization: tanh(meanFractionalDeviation × 3).
+    //   At 3× scale, a 30% mean deviation → tanh(0.9) ≈ 0.72 — well within range.
+    //   A 10% deviation → tanh(0.3) ≈ 0.29 — still clearly non-zero.
+    let totalFractionalDeviation = 0;
+    let muscleCount = 0;
+    for (const s of this.muscles) {
+      if (s.restLength > 1e-6) {
+        totalFractionalDeviation += Math.abs(s.currentLength - s.restLength) / s.restLength;
+        muscleCount++;
+      }
+    }
+    const stretchSensor = muscleCount > 0
+      ? Math.tanh((totalFractionalDeviation / muscleCount) * 3)
+      : 0;
+
+    // ── Proprioception: ground contact fraction (slot 13) ────────────────────
+    // Fraction of this agent's nodes that are currently in contact with terrain.
+    //
+    // A node is considered "grounded" when its Y position is within half a
+    // radius of the terrain surface below it (the constraint in PhysicsNode
+    // ensures pos.y >= groundY + radius, so a touching node sits right at that
+    // boundary with only numerical slack above it).
+    //
+    // Normalization: groundContactNodes / totalNodes — already in [0, 1].
+    let groundContactCount = 0;
+    for (const n of this.nodes) {
+      const groundY = heightfield.heightAt(n.pos.x, n.pos.z);
+      // Tolerance of half a radius handles the one-frame Verlet overshoot
+      if (n.pos.y <= groundY + n.radius + n.radius * 0.5) {
+        groundContactCount++;
+      }
+    }
+    const groundContactFraction = this.nodes.length > 0
+      ? groundContactCount / this.nodes.length
+      : 0;
+
+    // ── Assemble input vector (must match SENSOR_COUNT = 14) ─────────────────
     // Slot indices are the authoritative layout — see Genome.ts for the table.
     return [
-      /* 0 */ Math.min(1, this.energy / 250),               // own energy
-      /* 1 */ Math.tanh(nearestDx * dirScale * 5),           // food dir X
-      /* 2 */ Math.tanh(nearestDy * dirScale * 5),           // food dir Y
-      /* 3 */ Math.tanh(nearestDz * dirScale * 5),           // food dir Z
-      /* 4 */ Math.tanh(velX * 10),                          // own vel X
-      /* 5 */ Math.sin(this.phase),                          // oscillator sin
-      /* 6 */ Math.cos(this.phase),                          // oscillator cos
-      /* 7 */ Math.tanh(velZ * 10),                          // own vel Z
-      /* 8 */ Math.tanh(nearestDist / FOOD_DISTANCE_SCALE),  // food distance
-      /* 9 */ nearestFill,                                   // food zone energy
-      /* 10 */ wallProxX,                                    // wall proximity X
-      /* 11 */ wallProxZ,                                    // wall proximity Z
+      /* 0  */ Math.min(1, this.energy / 250),               // own energy
+      /* 1  */ Math.tanh(nearestDx * dirScale * 5),           // food dir X
+      /* 2  */ Math.tanh(nearestDy * dirScale * 5),           // food dir Y
+      /* 3  */ Math.tanh(nearestDz * dirScale * 5),           // food dir Z
+      /* 4  */ Math.tanh(velX * 10),                          // own vel X
+      /* 5  */ Math.sin(this.phase),                          // oscillator sin
+      /* 6  */ Math.cos(this.phase),                          // oscillator cos
+      /* 7  */ Math.tanh(velZ * 10),                          // own vel Z
+      /* 8  */ Math.tanh(nearestDist / FOOD_DISTANCE_SCALE),  // food distance
+      /* 9  */ nearestFill,                                   // food zone energy
+      /* 10 */ wallProxX,                                     // wall proximity X
+      /* 11 */ wallProxZ,                                     // wall proximity Z
+      /* 12 */ stretchSensor,                                 // proprioception: body activation
+      /* 13 */ groundContactFraction,                         // proprioception: feet planted
     ];
   }
 
@@ -211,7 +261,7 @@ export class Agent {
     this.phase += dt * (2.5 + Math.sin(this.phase * 0.3) * 0.5);
 
     // Brain → muscle activations
-    const inputs = this._sense(zones, worldWidth, worldDepth);
+    const inputs = this._sense(zones, worldWidth, worldDepth, heightfield);
     const outputs = this.genome.brain.forward(inputs);
     for (let i = 0; i < this.muscles.length; i++) {
       this.muscles[i].activation = outputs[i % outputs.length];
