@@ -71,6 +71,23 @@ const KINSHIP_SCALE = 35;
  */
 export type ArchetypeName = 'worm' | 'quad' | 'tripod';
 
+/**
+ * Sigma for node position mutations (dx, dy, dz).
+ *
+ * Reduced from 12 → 5 (Proposal #43, Lever A).
+ *
+ * Rationale: at sigma=12 a 5-node body with a 50-unit arm span drifts
+ * completely unrecognisable within 5–10 generations, making directional
+ * selection on morphology nearly impossible.  sigma=5 dramatically extends
+ * lineage lifetime, giving the brain time to adapt to a stable body plan
+ * and allowing selection to act on locomotion strategy rather than just
+ * resetting it each generation.
+ *
+ * Spring parameter sigmas are unchanged — they are proportional and already
+ * smaller in effect.
+ */
+const NODE_POSITION_SIGMA = 5;
+
 export class Genome {
   constructor(
     public nodes: NodeGene[],
@@ -267,10 +284,13 @@ export class Genome {
   mutate(): Genome {
     const p = (x: number, sigma: number) => x + (Math.random() - 0.5) * sigma;
 
+    // Node positions mutate with NODE_POSITION_SIGMA (reduced from 12 → 5).
+    // Mass and radius sigmas are unchanged — they are proportional and already
+    // small enough to allow stable refinement within a lineage.
     const newNodes = this.nodes.map(n => ({
-      dx: p(n.dx, 12),
-      dy: Math.max(0, p(n.dy, 12)),  // dy ≥ 0: never below ground
-      dz: p(n.dz, 12),
+      dx: p(n.dx, NODE_POSITION_SIGMA),
+      dy: Math.max(0, p(n.dy, NODE_POSITION_SIGMA)),  // dy ≥ 0: never below ground
+      dz: p(n.dz, NODE_POSITION_SIGMA),
       mass: Math.max(0.2, p(n.mass, 0.25)),
       radius: Math.max(2, p(n.radius, 1.2)),
     }));
