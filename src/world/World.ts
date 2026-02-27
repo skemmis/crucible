@@ -698,7 +698,10 @@ export class World {
         } else {
           const victim = this._weakestLiveAgent(agent.id);
           if (victim) {
-            this._depositCorpse(victim);
+            // No corpse for displaced agents — their energy dissipates.
+            // Conservation of energy: only natural deaths (lifespan / starvation)
+            // leave harvestable corpses.  Depositing energy here would let clusters
+            // sustain themselves by eating each other's corpses, bypassing food zones.
             victim.dead = true;
             liveCount--;
             this.telemetry.recordDeath();
