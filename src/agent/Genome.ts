@@ -64,6 +64,13 @@ const KINSHIP_MARKER_NODES = 3;
 /** Typical L2 kinship-vector distance between parent and child (empirically ~30–40). */
 const KINSHIP_SCALE = 35;
 
+/**
+ * Archetype names — used to draw from a known-locomoting seed pool at
+ * generation 0.  Archetypes are procedurally generated here so they require
+ * no external data files and remain in sync with NodeGene / SpringGene types.
+ */
+export type ArchetypeName = 'worm' | 'quad' | 'tripod';
+
 export class Genome {
   constructor(
     public nodes: NodeGene[],
@@ -102,6 +109,116 @@ export class Genome {
     const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount);
     return new Genome(nodes, springs, brain);
   }
+
+  // ─── Archetypes ─────────────────────────────────────────────────────────────
+
+  /**
+   * Return a procedurally generated archetype genome guaranteed to have a
+   * functional body plan.  All archetypes are fully actuated and have at least
+   * one triangle in their spring graph for structural stability.
+   *
+   * Three archetypes are available:
+   *
+   *  'worm'  — 5-node linear chain. Phase-staggered muscle activations produce
+   *             a peristaltic wave when the oscillator drives the brain.
+   *
+   *  'quad'  — 4-node rectangular body. Two diagonals create two triangles;
+   *             bilateral structure naturally produces symmetric gaits.
+   *
+   *  'tripod' — 3-node triangle. Minimal viable structure: one raised body node
+   *              and two ground-contact nodes, with all three springs actuated.
+   */
+  static archetype(name: ArchetypeName): Genome {
+    switch (name) {
+      case 'worm':   return Genome._worm();
+      case 'quad':   return Genome._quad();
+      case 'tripod': return Genome._tripod();
+    }
+  }
+
+  /** Pick a random archetype name uniformly. */
+  static randomArchetypeName(): ArchetypeName {
+    const names: ArchetypeName[] = ['worm', 'quad', 'tripod'];
+    return names[Math.floor(Math.random() * names.length)];
+  }
+
+  // ── Worm ────────────────────────────────────────────────────────────────────
+
+  private static _worm(): Genome {
+    // 5 nodes in a horizontal chain along X.
+    // Low dy keeps them close to ground; slight Z variance adds stability.
+    const nodes: NodeGene[] = [
+      { dx: -40, dy: 8,  dz:  0, mass: 0.9, radius: 6 },
+      { dx: -20, dy: 8,  dz:  2, mass: 0.9, radius: 6 },
+      { dx:   0, dy: 9,  dz:  0, mass: 0.9, radius: 6 },
+      { dx:  20, dy: 8,  dz: -2, mass: 0.9, radius: 6 },
+      { dx:  40, dy: 8,  dz:  0, mass: 0.9, radius: 6 },
+    ];
+
+    // Linear chain (4 muscles) + one stabilising diagonal to create a triangle
+    const springs: SpringGene[] = [
+      { a: 0, b: 1, stiffness: 300, damping: 6, restLengthFactor: 0.85, isActuated: true,  contractionRatio: 0.28 },
+      { a: 1, b: 2, stiffness: 300, damping: 6, restLengthFactor: 0.85, isActuated: true,  contractionRatio: 0.28 },
+      { a: 2, b: 3, stiffness: 300, damping: 6, restLengthFactor: 0.85, isActuated: true,  contractionRatio: 0.28 },
+      { a: 3, b: 4, stiffness: 300, damping: 6, restLengthFactor: 0.85, isActuated: true,  contractionRatio: 0.28 },
+      // Triangle brace: nodes 1-2-3 form a rigid triangle
+      { a: 1, b: 3, stiffness: 200, damping: 5, restLengthFactor: 1.0,  isActuated: false, contractionRatio: 0.20 },
+    ];
+
+    const muscleCount = springs.filter(s => s.isActuated).length; // 4
+    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount);
+    return new Genome(nodes, springs, brain);
+  }
+
+  // ── Quad ────────────────────────────────────────────────────────────────────
+
+  private static _quad(): Genome {
+    // 4 nodes in a rectangle, roughly symmetric about Z=0.
+    const nodes: NodeGene[] = [
+      { dx: -22, dy: 8, dz: -16, mass: 1.0, radius: 6 },  // 0: front-left
+      { dx:  22, dy: 8, dz: -16, mass: 1.0, radius: 6 },  // 1: front-right
+      { dx:  22, dy: 8, dz:  16, mass: 1.0, radius: 6 },  // 2: back-right
+      { dx: -22, dy: 8, dz:  16, mass: 1.0, radius: 6 },  // 3: back-left
+    ];
+
+    // Perimeter (4) + 2 diagonals → 2 triangles, fully triangulated quad
+    const springs: SpringGene[] = [
+      { a: 0, b: 1, stiffness: 350, damping: 7, restLengthFactor: 0.88, isActuated: true,  contractionRatio: 0.25 },
+      { a: 1, b: 2, stiffness: 350, damping: 7, restLengthFactor: 0.88, isActuated: true,  contractionRatio: 0.25 },
+      { a: 2, b: 3, stiffness: 350, damping: 7, restLengthFactor: 0.88, isActuated: true,  contractionRatio: 0.25 },
+      { a: 3, b: 0, stiffness: 350, damping: 7, restLengthFactor: 0.88, isActuated: true,  contractionRatio: 0.25 },
+      { a: 0, b: 2, stiffness: 250, damping: 5, restLengthFactor: 1.0,  isActuated: false, contractionRatio: 0.20 },
+      { a: 1, b: 3, stiffness: 250, damping: 5, restLengthFactor: 1.0,  isActuated: false, contractionRatio: 0.20 },
+    ];
+
+    const muscleCount = springs.filter(s => s.isActuated).length; // 4
+    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount);
+    return new Genome(nodes, springs, brain);
+  }
+
+  // ── Tripod ──────────────────────────────────────────────────────────────────
+
+  private static _tripod(): Genome {
+    // 3 nodes: one raised body + two ground-contact feet.
+    // The triangle is inherently rigid and all springs are actuated.
+    const nodes: NodeGene[] = [
+      { dx:   0, dy: 28, dz:  0, mass: 1.2, radius: 7 },  // 0: body (raised)
+      { dx: -22, dy:  6, dz: 18, mass: 0.8, radius: 5 },  // 1: left foot
+      { dx:  22, dy:  6, dz: 18, mass: 0.8, radius: 5 },  // 2: right foot
+    ];
+
+    const springs: SpringGene[] = [
+      { a: 0, b: 1, stiffness: 280, damping: 6, restLengthFactor: 0.80, isActuated: true,  contractionRatio: 0.30 },
+      { a: 0, b: 2, stiffness: 280, damping: 6, restLengthFactor: 0.80, isActuated: true,  contractionRatio: 0.30 },
+      { a: 1, b: 2, stiffness: 200, damping: 5, restLengthFactor: 0.90, isActuated: true,  contractionRatio: 0.22 },
+    ];
+
+    const muscleCount = springs.filter(s => s.isActuated).length; // 3
+    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount);
+    return new Genome(nodes, springs, brain);
+  }
+
+  // ─── Private spring helper ───────────────────────────────────────────────────
 
   private static randomSpring(a: number, b: number): SpringGene {
     return {
@@ -167,12 +284,11 @@ export class Genome {
       isActuated: Math.random() < 0.06 ? !s.isActuated : s.isActuated,
     }));
 
-    // Occasionally add a spring
+    // Occasionally add a spring — prefer triangle completion (~70% of additions)
     if (Math.random() < 0.12 && newNodes.length >= 2) {
-      const a = Math.floor(Math.random() * newNodes.length);
-      const b = (a + 1 + Math.floor(Math.random() * (newNodes.length - 1))) % newNodes.length;
-      if (!newSprings.some(s => (s.a === a && s.b === b) || (s.a === b && s.b === a))) {
-        newSprings.push(Genome.randomSpring(a, b));
+      const candidate = Genome._pickNewSpring(newNodes.length, newSprings);
+      if (candidate !== null) {
+        newSprings.push(Genome.randomSpring(candidate.a, candidate.b));
       }
     }
     // Occasionally remove a spring (keep at least nodeCount-1 for connectivity)
@@ -183,6 +299,56 @@ export class Genome {
     const newMuscleCount = Math.max(1, newSprings.filter(s => s.isActuated).length);
     const newBrain = this.brain.mutate(0.14, newMuscleCount);
     return new Genome(newNodes, newSprings, newBrain);
+  }
+
+  /**
+   * Pick an (a, b) pair for a new spring, biased toward triangle completion.
+   *
+   * Triangle-completion bias: scan for any pair (a, b) that share at least
+   * one common neighbour in the spring graph but are not yet directly
+   * connected.  If any such open triangle exists, complete one with 70%
+   * probability; otherwise fall back to a random edge.
+   *
+   * This is a *soft* bias — it never prevents random edges from being added,
+   * and it has no effect if the graph already has no open triangles.
+   */
+  private static _pickNewSpring(
+    nodeCount: number,
+    existing: SpringGene[],
+  ): { a: number; b: number } | null {
+    // Build adjacency list
+    const adj: Set<number>[] = Array.from({ length: nodeCount }, () => new Set<number>());
+    for (const s of existing) {
+      adj[s.a].add(s.b);
+      adj[s.b].add(s.a);
+    }
+
+    // Collect open triangles: pairs (a, b) not yet connected sharing a neighbour
+    const openTriangles: Array<{ a: number; b: number }> = [];
+    for (let a = 0; a < nodeCount; a++) {
+      for (const mid of adj[a]) {
+        for (const b of adj[mid]) {
+          if (b !== a && !adj[a].has(b) && a < b) {
+            openTriangles.push({ a, b });
+          }
+        }
+      }
+    }
+
+    // 70% chance to complete a triangle if one is available
+    if (openTriangles.length > 0 && Math.random() < 0.70) {
+      return openTriangles[Math.floor(Math.random() * openTriangles.length)];
+    }
+
+    // Fallback: random edge not already in the graph
+    const maxAttempts = 12;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const a = Math.floor(Math.random() * nodeCount);
+      const b = (a + 1 + Math.floor(Math.random() * (nodeCount - 1))) % nodeCount;
+      if (!adj[a].has(b)) return { a, b };
+    }
+
+    return null; // extremely dense graph — skip addition
   }
 
   clone(): Genome {
