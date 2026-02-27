@@ -40,6 +40,7 @@ export const AGENTS: AgentConfig[] = [
     emoji: '🌿',
     provider: 'anthropic',
     model: 'claude-sonnet-4-6',
+    thinkingBudget: 3000, // debate comments are 200–300 words; 3k thinking is plenty
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Naturalist**. Your philosophy: the most interesting behaviors emerge from \
@@ -60,6 +61,7 @@ the evolutionary logic is before you approve anything.`,
     emoji: '⚙️',
     provider: 'anthropic',
     model: 'claude-sonnet-4-6',
+    thinkingBudget: 3000,
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Systems Engineer**. Your philosophy: complexity is a liability. Every new \
@@ -81,6 +83,7 @@ proposals that duplicate what's already there or introduce unjustified complexit
     emoji: '🌀',
     provider: 'anthropic',
     model: 'claude-sonnet-4-6',
+    thinkingBudget: 3000,
     systemPrompt: `${SHARED_CONTEXT}
 
 Your role is the **Chaos Agent**. Your philosophy: the most interesting emergent behaviors arise \
