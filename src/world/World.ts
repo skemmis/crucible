@@ -763,28 +763,29 @@ export class World {
     // lag is acceptable at 60 Hz and avoids restructuring the update loop.
     this._applyInterAgentCollision();
 
-    // ── Contact damage ─────────────────────────────────────────────────────────
-    // Inter-agent collision forces drain energy from both parties proportionally
-    // to the total force received.  Both sides are penalised — this breaks up
-    // static blob pile-ups (every agent crammed together pays a metabolic price)
-    // while creating selection for agents that can deliver or absorb force well.
+    // ── Physical death by impact ───────────────────────────────────────────────
+    // Contact is a binary physics event, not a metabolic tax.  If the total
+    // inter-agent impulse received across all of an agent's nodes in a single
+    // frame exceeds CONTACT_DEATH_THRESHOLD, the agent dies instantly and drops
+    // a corpse.  Below the threshold, contact has no lasting effect.
     //
-    // Rate is intentionally low: light glancing contact barely registers; only
-    // sustained deep overlaps (a true pile-up) meaningfully drain energy.
-    // CONTACT_DAMAGE_RATE is in [energy / (force-unit × second)].
-    const CONTACT_DAMAGE_RATE = 0.001;
+    // Threshold intuition (stiffness = 120, halfF = overlap × 60):
+    //   gentle nudge   — 1 node, overlap 2 → 120   (safe)
+    //   glancing bump  — 3 nodes, overlap 3 → 540   (safe)
+    //   real crush     — 4 nodes, overlap 5 → 1200  (lethal ✓)
+    //   pile-up centre — many nodes deep   → 3000+  (lethal ✓)
+    //
+    // This creates selection for structural resilience and aggressive body plans
+    // without penalising incidental locomotion contact.
+    const CONTACT_DEATH_THRESHOLD = 800;
     for (const agent of this.agents) {
       if (agent.dead) continue;
-      let contactForce = 0;
-      for (const node of agent.nodes) contactForce += node.interAgentImpulse;
-      if (contactForce > 0) {
-        agent.energy -= contactForce * CONTACT_DAMAGE_RATE * dt;
-        if (agent.energy <= 0) {
-          agent.energy = 0;
-          this._depositCorpse(agent);
-          agent.dead = true;
-          this.telemetry.recordDeath();
-        }
+      let totalImpulse = 0;
+      for (const node of agent.nodes) totalImpulse += node.interAgentImpulse;
+      if (totalImpulse >= CONTACT_DEATH_THRESHOLD) {
+        this._depositCorpse(agent);
+        agent.dead = true;
+        this.telemetry.recordDeath();
       }
     }
 
