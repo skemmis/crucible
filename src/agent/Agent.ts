@@ -310,14 +310,14 @@ export class Agent {
     return this.energy > 160 && this.age > 3;
   }
 
-  reproduce(): Agent {
+  reproduce(spawnX?: number, spawnY?: number, spawnZ?: number): Agent {
     this.energy -= 80;
     const c = this.centerPos;
     return new Agent(
       this.genome.mutate(),
-      c.x + (Math.random() - 0.5) * 30,
-      c.y,
-      c.z + (Math.random() - 0.5) * 30,
+      spawnX ?? c.x + (Math.random() - 0.5) * 30,
+      spawnY ?? c.y,
+      spawnZ ?? c.z + (Math.random() - 0.5) * 30,
       this.generation + 1,
       this.id,
       this.hue,

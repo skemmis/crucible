@@ -487,11 +487,31 @@ export class World {
   }
 
   /**
+   * Pick a spawn position for an offspring: a random direction from the
+   * parent's centre at 80–120 world units, clamped to world bounds.
+   * Returns [spawnX, spawnY, spawnZ] where spawnY is the terrain height.
+   *
+   * This deliberately scatters children well outside the parent's body
+   * (body radius ~25–50 units) to prevent blob pile-ups where offspring
+   * are born on top of each other and never disperse.
+   */
+  private _offspringSpawn(parent: Agent): [number, number, number] {
+    const c = parent.centerPos;
+    const angle = Math.random() * Math.PI * 2;
+    const dist  = 80 + Math.random() * 40;          // 80–120 units
+    const margin = 40;
+    const sx = Math.max(margin, Math.min(this.worldWidth  - margin, c.x + Math.cos(angle) * dist));
+    const sz = Math.max(margin, Math.min(this.worldDepth - margin, c.z + Math.sin(angle) * dist));
+    const sy = this.heightfield.heightAt(sx, sz);
+    return [sx, sy, sz];
+  }
+
+  /**
    * Return the live agent with the lowest energy, excluding the given id.
    * Used for competitive displacement: when a fit agent reproduces into a
    * full world, the weakest incumbent is evicted to make room.
    */
-  private _weakestLiveAgent(excludeId: string): Agent | null {
+  private _weakestLiveAgent(excludeId: number): Agent | null {
     let weakest: Agent | null = null;
     let minEnergy = Infinity;
     for (const a of this.agents) {
@@ -690,7 +710,8 @@ export class World {
       // selection pressure.
       if (agent.canReproduce()) {
         if (liveCount + offspring.length < this.maxAgents) {
-          const child = agent.reproduce();
+          const [sx, sy, sz] = this._offspringSpawn(agent);
+          const child = agent.reproduce(sx, sy, sz);
           offspring.push(child);
           this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
           this.telemetry.recordBirth();
@@ -705,7 +726,8 @@ export class World {
             victim.dead = true;
             liveCount--;
             this.telemetry.recordDeath();
-            const child = agent.reproduce();
+            const [sx, sy, sz] = this._offspringSpawn(agent);
+            const child = agent.reproduce(sx, sy, sz);
             offspring.push(child);
             this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
             this.telemetry.recordBirth();
