@@ -21,12 +21,16 @@ export interface SpringGene {
 }
 
 /**
- * Sensor input layout — 12 inputs.
+ * Sensor input layout — 14 inputs.
  *
  * This layout is the single source of truth for what agents can perceive.
  * Every slot is listed here; no sense is silently "always on" or scattered
- * across multiple files.  When Option 3 (evolvable sense allocation) is built,
- * this table becomes the sense registry that genomes index into.
+ * across multiple files.
+ *
+ * Slots 0–11 are world-state inputs (food, velocity, walls, oscillator).
+ * Slots 12–13 are proprioceptive inputs (Proposal #43, Lever D) — they give
+ * the brain feedback about the body's own physical state, enabling gait
+ * coordination beyond the global oscillator signal.
  *
  * Slot | Signal                        | Range   | Notes
  * -----|-------------------------------|---------|------------------------------
@@ -42,8 +46,14 @@ export interface SpringGene {
  *  9   | Nearest food zone energy      | [0, 1]  | zone.energy / zone.maxEnergy
  * 10   | Wall proximity X              | [0, 1]  | 1 = touching wall, 0 = centre
  * 11   | Wall proximity Z              | [0, 1]  | 1 = touching wall, 0 = centre
+ * 12   | Stretch sensor (tanh)         | [0, 1]  | mean |springLen - restLen| / restLen,
+ *      |                               |         | tanh-scaled by 3×; actuated springs only.
+ *      |                               |         | Tells the brain how "activated" the body
+ *      |                               |         | currently is.
+ * 13   | Ground contact fraction       | [0, 1]  | groundContactNodes / totalNodes.
+ *      |                               |         | Tells the brain how many feet are planted.
  */
-export const SENSOR_COUNT = 12;
+export const SENSOR_COUNT = 14;
 
 /** Distance at which wall-proximity sensor saturates (world units). */
 export const WALL_SENSE_RADIUS = 200;
