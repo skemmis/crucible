@@ -1,8 +1,9 @@
 import { PhysicsNode } from '../physics/PhysicsNode';
 import { Spring } from '../physics/Spring';
 import { Vec3 } from '../physics/Vec3';
-import { Genome, SENSOR_COUNT, WALL_SENSE_RADIUS, FOOD_DISTANCE_SCALE } from './Genome';
+import { Genome, SENSOR_COUNT, ACTION_OUTPUT_COUNT, WALL_SENSE_RADIUS, FOOD_DISTANCE_SCALE } from './Genome';
 import { Heightfield } from '../world/Heightfield';
+import { Prop } from '../world/Prop';
 
 let nextId = 0;
 
@@ -29,6 +30,15 @@ export class Agent {
   age: number = 0;
   phase: number;
   dead: boolean = false;
+
+  /**
+   * Last prop manipulation action outputs from the brain (tanh range [-1, 1]).
+   * Values > 0.5 trigger the respective action in World._processAgentActions().
+   * Reset to 0 when the agent dies so stale actions don't trigger on corpses.
+   */
+  lastGrabAction: number = 0;
+  lastReleaseAction: number = 0;
+  lastConnectAction: number = 0;
 
   readonly generation: number;
   readonly parentId: number | null;
@@ -130,12 +140,15 @@ export class Agent {
   // ── Sensing ──────────────────────────────────────────────────────────────────
 
   /**
-   * Build the 14-element sensor input vector.
+   * Build the 22-element sensor input vector.
    * Slot layout is defined in Genome.ts — this method is the single place where
    * world-state queries are assembled into that layout.
    *
-   * Slots 0–11: world-state inputs (unchanged from prior layout).
+   * Slots 0–11:  world-state inputs (food, velocity, walls, oscillator).
    * Slots 12–13: proprioceptive inputs (Proposal #43, Lever D).
+   * Slots 14–15: terrain sensing.
+   * Slots 16–18: nearest other-agent sensing.
+   * Slots 19–21: nearest prop sensing (manipulable objects).
    */
   private _sense(
     zones: EnergyZone[],
@@ -143,6 +156,7 @@ export class Agent {
     worldDepth: number,
     heightfield: Heightfield,
     allAgents: Agent[],
+    allProps: Prop[],
   ): number[] {
     const c = this.centerPos;
 
@@ -268,7 +282,25 @@ export class Agent {
       }
     }
 
-    // ── Assemble input vector (must match SENSOR_COUNT = 19) ─────────────────
+    // ── Nearest prop sensing ──────────────────────────────────────────────────
+    // Slots 19–21: direction and distance to the nearest manipulable prop.
+    // Lets the brain navigate toward (or away from) objects it can grab.
+    let nearPropDirX = 0, nearPropDirZ = 0, nearPropDist = 1;
+    let minPropDist = Infinity;
+    for (const prop of allProps) {
+      const pdx = prop.node.pos.x - c.x;
+      const pdz = prop.node.pos.z - c.z;
+      const pdist = Math.sqrt(pdx * pdx + pdz * pdz);
+      if (pdist < minPropDist) {
+        minPropDist = pdist;
+        const inv = 1 / (pdist + 1e-6);
+        nearPropDirX = Math.tanh(pdx * inv * 5);
+        nearPropDirZ = Math.tanh(pdz * inv * 5);
+        nearPropDist = Math.tanh(pdist / 200);
+      }
+    }
+
+    // ── Assemble input vector (must match SENSOR_COUNT = 22) ─────────────────
     // Slot indices are the authoritative layout — see Genome.ts for the table.
     return [
       /* 0  */ Math.min(1, this.energy / 250),               // own energy
@@ -290,6 +322,9 @@ export class Agent {
       /* 16 */ nearAgentDirX,                                 // nearest agent dir X
       /* 17 */ nearAgentDirZ,                                 // nearest agent dir Z
       /* 18 */ nearAgentDist,                                 // nearest agent distance
+      /* 19 */ nearPropDirX,                                  // nearest prop dir X
+      /* 20 */ nearPropDirZ,                                  // nearest prop dir Z
+      /* 21 */ nearPropDist,                                  // nearest prop distance
     ];
   }
 
@@ -302,16 +337,22 @@ export class Agent {
     worldDepth: number,
     heightfield: Heightfield,
     allAgents: Agent[] = [],
+    allProps: Prop[] = [],
   ): void {
     this.age += dt;
     this.phase += dt * (2.5 + Math.sin(this.phase * 0.3) * 0.5);
 
-    // Brain → muscle activations
-    const inputs = this._sense(zones, worldWidth, worldDepth, heightfield, allAgents);
+    // Brain → muscle activations + prop manipulation action channels
+    const inputs = this._sense(zones, worldWidth, worldDepth, heightfield, allAgents, allProps);
     const outputs = this.genome.brain.forward(inputs);
-    for (let i = 0; i < this.muscles.length; i++) {
-      this.muscles[i].activation = outputs[i % outputs.length];
+    const muscleCount = this.muscles.length;
+    // First muscleCount outputs drive muscles; last ACTION_OUTPUT_COUNT are actions.
+    for (let i = 0; i < muscleCount; i++) {
+      this.muscles[i].activation = outputs[i % muscleCount];
     }
+    this.lastGrabAction    = outputs[muscleCount]     ?? 0;
+    this.lastReleaseAction = outputs[muscleCount + 1] ?? 0;
+    this.lastConnectAction = outputs[muscleCount + 2] ?? 0;
 
     // Spring forces + energy cost
     let energyCost = 0;
@@ -334,22 +375,10 @@ export class Agent {
       n.constrainToWorldBounds(0, worldWidth, 0, worldDepth);
     }
 
-    // Fall death: if any node struck terrain with enough downward speed, the
-    // agent dies from the impact.  Threshold calibration (at 60 fps):
-    //   acc_per_frame = G × dt² = 600 / 3600 ≈ 0.167 vel-units added/frame
-    //   impact speed after falling H units ≈ 0.578 × √H
-    //   H = 40  → ~3.7 units/frame  (lethal at threshold 3.5)
-    //   H = 25  → ~2.9 units/frame  (safe at threshold 3.5)
-    //   H = 60  → ~4.5 units/frame  (lethal)
-    // With terrain amplitude 60, this means falls from significant terrain
-    // features are lethal while small hops during locomotion are safe.
-    const FALL_DEATH_VEL = 3.5;
-    for (const n of this.nodes) {
-      if (n.landingVel > FALL_DEATH_VEL) {
-        this.dead = true;
-        break;
-      }
-    }
+    // NOTE: Fall death was removed — at terrain amplitude 60 the maximum
+    // free-fall landing velocity is ~4.5 units/frame, which is too close to the
+    // locomotion range and killed jumping gaits before they could evolve.
+    // landingVel is still captured by PhysicsNode for future diagnostic use.
 
     // Energy accounting
     this.energy -= energyCost;

@@ -48,7 +48,7 @@ window.addEventListener('keydown', e => {
       break;
     case '>':
     case '.':
-      speed = Math.min(16, speed * 2);
+      speed = Math.min(64, speed * 2);
       break;
     case '<':
     case ',':

@@ -21,16 +21,17 @@ export interface SpringGene {
 }
 
 /**
- * Sensor input layout — 14 inputs.
+ * Sensor input layout — 22 inputs.
  *
  * This layout is the single source of truth for what agents can perceive.
  * Every slot is listed here; no sense is silently "always on" or scattered
  * across multiple files.
  *
  * Slots 0–11 are world-state inputs (food, velocity, walls, oscillator).
- * Slots 12–13 are proprioceptive inputs (Proposal #43, Lever D) — they give
- * the brain feedback about the body's own physical state, enabling gait
- * coordination beyond the global oscillator signal.
+ * Slots 12–13 are proprioceptive inputs (Proposal #43, Lever D).
+ * Slots 14–15 are terrain-sensing inputs.
+ * Slots 16–18 are nearest-agent sensing inputs.
+ * Slots 19–21 are nearest-prop sensing inputs (manipulable objects).
  *
  * Slot | Signal                        | Range   | Notes
  * -----|-------------------------------|---------|------------------------------
@@ -48,21 +49,27 @@ export interface SpringGene {
  * 11   | Wall proximity Z              | [0, 1]  | 1 = touching wall, 0 = centre
  * 12   | Stretch sensor (tanh)         | [0, 1]  | mean |springLen - restLen| / restLen,
  *      |                               |         | tanh-scaled by 3×; actuated springs only.
- *      |                               |         | Tells the brain how "activated" the body
- *      |                               |         | currently is.
  * 13   | Ground contact fraction       | [0, 1]  | groundContactNodes / totalNodes.
- *      |                               |         | Tells the brain how many feet are planted.
  * 14   | Terrain slope ahead (tanh)   | [-1, 1] | heightAt(pos + vel*25) - heightAt(pos),
  *      |                               |         | tanh-scaled by 0.1. Positive = uphill.
  * 15   | Terrain elevation            | [0, 1]  | heightAt(pos) / maxTerrainHeight.
- *      |                               |         | Tells agent how high on the terrain it sits.
- * 16   | Nearest agent direction X    | [-1, 1] | tanh-normalised direction to nearest live
- *      |                               |         | other agent (0 if none nearby).
- * 17   | Nearest agent direction Z    | [-1, 1] | tanh-normalised direction to nearest live
- *      |                               |         | other agent (0 if none nearby).
+ * 16   | Nearest agent direction X    | [-1, 1] | tanh-normalised direction to nearest live agent.
+ * 17   | Nearest agent direction Z    | [-1, 1] | tanh-normalised direction to nearest live agent.
  * 18   | Nearest agent distance       | [0, 1]  | tanh(dist / 150). 0 = on top of it.
+ * 19   | Nearest prop direction X     | [-1, 1] | tanh-normalised direction to nearest prop.
+ * 20   | Nearest prop direction Z     | [-1, 1] | tanh-normalised direction to nearest prop.
+ * 21   | Nearest prop distance        | [0, 1]  | tanh(dist / 200). 0 = on top of it.
  */
-export const SENSOR_COUNT = 19;
+export const SENSOR_COUNT = 22;
+
+/**
+ * Number of extra output neurons appended after the muscle outputs.
+ * These channels drive the prop manipulation actions:
+ *   brain_outputs[muscleCount + 0] > 0.5  → try to grab nearest prop
+ *   brain_outputs[muscleCount + 1] > 0.5  → release all carried props
+ *   brain_outputs[muscleCount + 2] > 0.5  → connect two carried props
+ */
+export const ACTION_OUTPUT_COUNT = 3;
 
 /** Distance at which wall-proximity sensor saturates (world units). */
 export const WALL_SENSE_RADIUS = 200;
@@ -142,7 +149,7 @@ export class Genome {
     }
 
     const muscleCount = Math.max(1, springs.filter(s => s.isActuated).length);
-    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount);
+    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount + ACTION_OUTPUT_COUNT);
     return new Genome(nodes, springs, brain);
   }
 
@@ -202,7 +209,7 @@ export class Genome {
     ];
 
     const muscleCount = springs.filter(s => s.isActuated).length; // 4
-    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount);
+    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount + ACTION_OUTPUT_COUNT);
     return new Genome(nodes, springs, brain);
   }
 
@@ -228,7 +235,7 @@ export class Genome {
     ];
 
     const muscleCount = springs.filter(s => s.isActuated).length; // 4
-    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount);
+    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount + ACTION_OUTPUT_COUNT);
     return new Genome(nodes, springs, brain);
   }
 
@@ -250,7 +257,7 @@ export class Genome {
     ];
 
     const muscleCount = springs.filter(s => s.isActuated).length; // 3
-    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount);
+    const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount + ACTION_OUTPUT_COUNT);
     return new Genome(nodes, springs, brain);
   }
 
@@ -336,7 +343,7 @@ export class Genome {
     }
 
     const newMuscleCount = Math.max(1, newSprings.filter(s => s.isActuated).length);
-    const newBrain = this.brain.mutate(0.14, newMuscleCount);
+    const newBrain = this.brain.mutate(0.14, newMuscleCount + ACTION_OUTPUT_COUNT);
     return new Genome(newNodes, newSprings, newBrain);
   }
 

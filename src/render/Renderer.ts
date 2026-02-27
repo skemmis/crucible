@@ -4,10 +4,13 @@ import { World } from '../world/World';
 import { Agent } from '../agent/Agent';
 import { EnergyZone, CorpseDepot } from '../world/Environment';
 import { Heightfield } from '../world/Heightfield';
+import { PROP_TYPE_CONFIGS } from '../world/Prop';
 
 // Pre-allocate generous upper bounds — never reallocate during the sim
-const MAX_NODES = 600;
-const MAX_SPRINGS = 1800;
+// Bumped for props: 40 props + up to 600 agent nodes = 640 total
+const MAX_NODES = 700;
+// Bumped for grab springs (≤80) + prop connections (≤160) on top of agent springs
+const MAX_SPRINGS = 2400;
 
 // Per-tier visual palette
 const TIER_COLORS = [
@@ -319,6 +322,7 @@ export class Renderer {
     this._renderZones(world);
     this._renderCorpses(world);
     this._renderAgents(world);
+    this._renderProps(world);
     this._renderSelection(world.heightfield);
 
     this.renderer.render(this.scene, this.camera);
@@ -457,6 +461,94 @@ export class Renderer {
     this._nodeMesh.instanceMatrix.needsUpdate = true;
     if (this._nodeMesh.instanceColor) this._nodeMesh.instanceColor.needsUpdate = true;
 
+    this._springGeo.setDrawRange(0, springIdx * 2);
+    (this._springGeo.attributes['position'] as THREE.BufferAttribute).needsUpdate = true;
+    (this._springGeo.attributes['color'] as THREE.BufferAttribute).needsUpdate = true;
+  }
+
+  // ── Prop rendering ────────────────────────────────────────────────────────────
+
+  /**
+   * Render each prop as a sphere in the existing node InstancedMesh, using
+   * per-type HSL colours.  Grab springs and prop-prop connections are drawn
+   * as lines in the existing spring line buffer.
+   *
+   * Called AFTER _renderAgents() so prop nodes go into the remaining node
+   * slots and prop lines go into the remaining spring slots.
+   */
+  private _renderProps(world: World): void {
+    // _renderAgents already set _nodeMesh.count and the spring draw range.
+    // We extend both from where agents left off.
+    let nodeIdx = this._nodeMesh.count;
+    let springIdx = this._springGeo.drawRange.count / 2; // each segment = 2 verts
+
+    const _tmpColor = new THREE.Color();
+
+    // ── Prop spheres ───────────────────────────────────────────────────────────
+    for (const prop of world.props) {
+      if (nodeIdx >= MAX_NODES) break;
+
+      this._dummy.position.set(prop.node.pos.x, prop.node.pos.y, prop.node.pos.z);
+      this._dummy.scale.setScalar(prop.node.radius);
+      this._dummy.updateMatrix();
+      this._nodeMesh.setMatrixAt(nodeIdx, this._dummy.matrix);
+
+      const cfg = PROP_TYPE_CONFIGS[prop.type];
+      // Brighten slightly when carried so it's easy to spot
+      const lit = prop.carriedBy !== null ? cfg.lit + 0.15 : cfg.lit;
+      _tmpColor.setHSL(cfg.hue / 360, cfg.sat, Math.min(1, lit));
+      this._nodeMesh.setColorAt(nodeIdx, _tmpColor);
+      nodeIdx++;
+    }
+
+    // Upload updated node count
+    this._nodeMesh.count = nodeIdx;
+    this._nodeMesh.instanceMatrix.needsUpdate = true;
+    if (this._nodeMesh.instanceColor) this._nodeMesh.instanceColor.needsUpdate = true;
+
+    // ── Grab spring lines (bright yellow) ─────────────────────────────────────
+    for (const gs of world.grabSprings) {
+      if (springIdx >= MAX_SPRINGS) break;
+      const b = springIdx * 6;
+
+      this._springPositions[b + 0] = gs.agentNode.pos.x;
+      this._springPositions[b + 1] = gs.agentNode.pos.y;
+      this._springPositions[b + 2] = gs.agentNode.pos.z;
+      this._springPositions[b + 3] = gs.prop.node.pos.x;
+      this._springPositions[b + 4] = gs.prop.node.pos.y;
+      this._springPositions[b + 5] = gs.prop.node.pos.z;
+
+      // Yellow: R=1 G=0.9 B=0
+      for (let v = 0; v < 2; v++) {
+        this._springColors[b + v * 3 + 0] = 1.0;
+        this._springColors[b + v * 3 + 1] = 0.9;
+        this._springColors[b + v * 3 + 2] = 0.0;
+      }
+      springIdx++;
+    }
+
+    // ── Prop-connection lines (orange) ────────────────────────────────────────
+    for (const conn of world.propConnections) {
+      if (springIdx >= MAX_SPRINGS) break;
+      const b = springIdx * 6;
+
+      this._springPositions[b + 0] = conn.propA.node.pos.x;
+      this._springPositions[b + 1] = conn.propA.node.pos.y;
+      this._springPositions[b + 2] = conn.propA.node.pos.z;
+      this._springPositions[b + 3] = conn.propB.node.pos.x;
+      this._springPositions[b + 4] = conn.propB.node.pos.y;
+      this._springPositions[b + 5] = conn.propB.node.pos.z;
+
+      // Orange: R=1 G=0.5 B=0
+      for (let v = 0; v < 2; v++) {
+        this._springColors[b + v * 3 + 0] = 1.0;
+        this._springColors[b + v * 3 + 1] = 0.5;
+        this._springColors[b + v * 3 + 2] = 0.0;
+      }
+      springIdx++;
+    }
+
+    // Upload extended spring buffer
     this._springGeo.setDrawRange(0, springIdx * 2);
     (this._springGeo.attributes['position'] as THREE.BufferAttribute).needsUpdate = true;
     (this._springGeo.attributes['color'] as THREE.BufferAttribute).needsUpdate = true;

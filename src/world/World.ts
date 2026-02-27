@@ -2,6 +2,8 @@ import { Agent } from '../agent/Agent';
 import { Genome, ArchetypeName } from '../agent/Genome';
 import { Environment } from './Environment';
 import { Heightfield } from './Heightfield';
+import { PhysicsNode } from '../physics/PhysicsNode';
+import { Prop, PROP_TYPES, PROP_TYPE_CONFIGS } from './Prop';
 import { SpatialHash, COLLISION_CELL_SIZE } from './SpatialHash';
 
 export interface WorldConfig {
@@ -23,7 +25,7 @@ export const DEFAULT_CONFIG: WorldConfig = {
   maxAgents: 60,
   zoneCount: 24,   // increased from 12 → 24 to distribute agents and reduce bottlenecking
   heightfieldResolution: 64,
-  heightfieldAmplitude: 60,
+  heightfieldAmplitude: 35,
 };
 
 // ── Telemetry types ────────────────────────────────────────────────────────────
@@ -383,6 +385,37 @@ class TelemetryTracker {
 
 // ── World ─────────────────────────────────────────────────────────────────────
 
+// ── Prop manipulation constants ───────────────────────────────────────────────
+
+/** Number of props scattered across the world at construction. */
+const PROP_COUNT = 40;
+
+/**
+ * Distance beyond the sum of an agent-node radius and a prop radius within
+ * which a grab action will attach a spring between them.
+ */
+const GRAB_RANGE = 25;
+
+/** Spring stiffness pulling a grabbed prop toward its carrying node. */
+const GRAB_STIFFNESS = 180;
+
+/**
+ * Maximum number of props one agent may carry simultaneously.
+ * Two is the minimum needed to connect two props together.
+ */
+const MAX_GRABS_PER_AGENT = 2;
+
+/**
+ * Maximum world-unit distance between two carried props for the connect
+ * action to form a spring between them.
+ */
+const CONNECT_RANGE = 80;
+
+/** Spring stiffness for prop-to-prop structural connections. */
+const CONNECT_STIFFNESS = 120;
+
+// ── World ─────────────────────────────────────────────────────────────────────
+
 export class World {
   agents: Agent[] = [];
   env: Environment;
@@ -394,6 +427,30 @@ export class World {
   readonly worldWidth: number;
   readonly worldDepth: number;
   readonly maxAgents: number;
+
+  /** Manipulable environmental objects agents can grab, connect, and release. */
+  props: Prop[] = [];
+
+  /**
+   * Active grab springs: each entry links an agent node to a prop node with
+   * a spring force applied each frame.  Agents hold props via these springs.
+   */
+  private _grabSprings: Array<{
+    prop: Prop;
+    agentNode: PhysicsNode;
+    agentId: number;
+  }> = [];
+
+  /**
+   * Permanent structural connections between props, created when an agent
+   * triggers the "connect" action while carrying two props close together.
+   * These persist even after the agent releases the props, enabling built structures.
+   */
+  private _propConnections: Array<{
+    propA: Prop;
+    propB: Prop;
+    restLength: number;
+  }> = [];
 
   /** Active configuration — stored so it can be included in every snapshot. */
   readonly config: WorldConfig;
@@ -434,6 +491,7 @@ export class World {
       (x, z) => this.heightfield.heightAt(x, z),
     );
 
+    this._initProps();
     this._seedInitialPopulation(cfg.initialAgents);
   }
 
@@ -531,6 +589,218 @@ export class World {
       }
     }
     return weakest;
+  }
+
+  // ── Prop lifecycle ────────────────────────────────────────────────────────────
+
+  /**
+   * Scatter PROP_COUNT props across the terrain at construction.  Props are
+   * placed directly on the terrain surface (node Y = groundY + radius) and
+   * spread evenly across all four types in round-robin order.
+   */
+  private _initProps(): void {
+    for (let i = 0; i < PROP_COUNT; i++) {
+      const type = PROP_TYPES[i % PROP_TYPES.length];
+      const x = 50 + Math.random() * (this.worldWidth - 100);
+      const z = 50 + Math.random() * (this.worldDepth - 100);
+      const cfg = PROP_TYPE_CONFIGS[type];
+      const groundY = this.heightfield.heightAt(x, z);
+      this.props.push(new Prop(type, x, groundY + cfg.radius, z));
+    }
+  }
+
+  /**
+   * Apply grab spring forces to both the carrying agent node (reaction) and
+   * the prop node (pull).  Must be called BEFORE agent.update() so the
+   * forces are consumed by the agent's own Verlet integration step.
+   *
+   * Physics: a zero-damping spring with rest length = nodeRadius + propRadius
+   * (just touching) pulls the prop toward the carrying node.  The prop's
+   * weight creates a reaction force on the agent node that slows locomotion —
+   * heavier prop types are genuinely harder to carry.
+   */
+  private _applyGrabSprings(): void {
+    for (const gs of this._grabSprings) {
+      const an = gs.agentNode;
+      const pn = gs.prop.node;
+
+      const dx = pn.pos.x - an.pos.x;
+      const dy = pn.pos.y - an.pos.y;
+      const dz = pn.pos.z - an.pos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq < 1e-9) continue;
+      const dist = Math.sqrt(distSq);
+
+      // Spring rest length: just touching (no overlap)
+      const restLen = an.radius + pn.radius;
+      const stretch = dist - restLen;
+      if (stretch <= 0) continue; // already within target distance
+
+      const forceMag = stretch * GRAB_STIFFNESS;
+      const nx = dx / dist;
+      const ny = dy / dist;
+      const nz = dz / dist;
+
+      // Pull prop toward the agent node
+      pn.acc.x -= (forceMag * nx) / pn.mass;
+      pn.acc.y -= (forceMag * ny) / pn.mass;
+      pn.acc.z -= (forceMag * nz) / pn.mass;
+
+      // Reaction on agent node (heavier props resist more)
+      an.acc.x += (forceMag * nx) / an.mass;
+      an.acc.y += (forceMag * ny) / an.mass;
+      an.acc.z += (forceMag * nz) / an.mass;
+    }
+  }
+
+  /**
+   * Apply spring forces between prop-pairs that have been connected by agents.
+   * Must be called BEFORE _updateProps() so forces are consumed by prop integration.
+   */
+  private _applyPropConnections(): void {
+    for (const conn of this._propConnections) {
+      const pA = conn.propA.node;
+      const pB = conn.propB.node;
+
+      const dx = pB.pos.x - pA.pos.x;
+      const dy = pB.pos.y - pA.pos.y;
+      const dz = pB.pos.z - pA.pos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq < 1e-9) continue;
+      const dist = Math.sqrt(distSq);
+
+      const stretch = dist - conn.restLength;
+      const forceMag = stretch * CONNECT_STIFFNESS;
+      const nx = dx / dist;
+      const ny = dy / dist;
+      const nz = dz / dist;
+
+      pA.acc.x += (forceMag * nx) / pA.mass;
+      pA.acc.y += (forceMag * ny) / pA.mass;
+      pA.acc.z += (forceMag * nz) / pA.mass;
+      pB.acc.x -= (forceMag * nx) / pB.mass;
+      pB.acc.y -= (forceMag * ny) / pB.mass;
+      pB.acc.z -= (forceMag * nz) / pB.mass;
+    }
+  }
+
+  /**
+   * Integrate prop physics: gravity → integrate → ground & world constraint.
+   * Must be called AFTER _applyGrabSprings() and _applyPropConnections() so
+   * those accumulated forces are included in the Verlet step.
+   */
+  private _updateProps(dt: number): void {
+    const G = 600;
+    for (const prop of this.props) {
+      prop.node.acc.y -= G;
+      prop.node.integrate(dt);
+      const groundY = this.heightfield.heightAt(prop.node.pos.x, prop.node.pos.z);
+      prop.node.constrainToGround(groundY, 0.5, 0.2);
+      prop.node.constrainToWorldBounds(0, this.worldWidth, 0, this.worldDepth);
+    }
+  }
+
+  /**
+   * Process each live agent's grab / release / connect action outputs.
+   * Must run AFTER agent.update() (which sets the lastXxxAction fields).
+   *
+   * Grab   (> 0.5): attach a spring to the nearest unclaimed prop within
+   *                 GRAB_RANGE + combined radii, up to MAX_GRABS_PER_AGENT.
+   * Release(> 0.5): detach all props this agent is carrying.
+   * Connect(> 0.5): if carrying two props within CONNECT_RANGE, link them
+   *                 with a permanent structural spring.
+   */
+  private _processAgentActions(): void {
+    for (const agent of this.agents) {
+      if (agent.dead) continue;
+
+      // Release: detach all carried props before potentially re-grabbing
+      if (agent.lastReleaseAction > 0.5) {
+        this._grabSprings = this._grabSprings.filter(gs => {
+          if (gs.agentId === agent.id) {
+            gs.prop.carriedBy = null;
+            return false;
+          }
+          return true;
+        });
+      }
+
+      // Grab: attach nearest unclaimed prop within range
+      if (agent.lastGrabAction > 0.5) {
+        const agentGrabCount = this._grabSprings.filter(gs => gs.agentId === agent.id).length;
+        if (agentGrabCount < MAX_GRABS_PER_AGENT) {
+          let nearestProp: Prop | null = null;
+          let nearestDist = Infinity;
+          let nearestNode: PhysicsNode | null = null;
+
+          for (const prop of this.props) {
+            if (prop.carriedBy !== null) continue; // already claimed
+
+            for (const an of agent.nodes) {
+              const dx = prop.node.pos.x - an.pos.x;
+              const dy = prop.node.pos.y - an.pos.y;
+              const dz = prop.node.pos.z - an.pos.z;
+              const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+              const threshold = an.radius + prop.node.radius + GRAB_RANGE;
+              if (dist < threshold && dist < nearestDist) {
+                nearestDist = dist;
+                nearestProp = prop;
+                nearestNode = an;
+              }
+            }
+          }
+
+          if (nearestProp !== null && nearestNode !== null) {
+            nearestProp.carriedBy = agent.id;
+            this._grabSprings.push({
+              prop: nearestProp,
+              agentNode: nearestNode,
+              agentId: agent.id,
+            });
+          }
+        }
+      }
+
+      // Connect: link two currently-carried props with a structural spring
+      if (agent.lastConnectAction > 0.5) {
+        const carriedGrabs = this._grabSprings.filter(gs => gs.agentId === agent.id);
+        for (let i = 0; i < carriedGrabs.length; i++) {
+          for (let j = i + 1; j < carriedGrabs.length; j++) {
+            const pA = carriedGrabs[i].prop;
+            const pB = carriedGrabs[j].prop;
+
+            // Skip if already connected
+            const alreadyLinked = this._propConnections.some(
+              c => (c.propA === pA && c.propB === pB) || (c.propA === pB && c.propB === pA),
+            );
+            if (alreadyLinked) continue;
+
+            const dx = pA.node.pos.x - pB.node.pos.x;
+            const dy = pA.node.pos.y - pB.node.pos.y;
+            const dz = pA.node.pos.z - pB.node.pos.z;
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist <= CONNECT_RANGE) {
+              this._propConnections.push({ propA: pA, propB: pB, restLength: dist });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Remove grab springs whose carrying agent has died.
+   * Called after dead agents are pruned from this.agents.
+   */
+  private _cleanupDeadAgentGrabs(): void {
+    const liveIds = new Set(this.agents.map(a => a.id));
+    this._grabSprings = this._grabSprings.filter(gs => {
+      if (!liveIds.has(gs.agentId)) {
+        gs.prop.carriedBy = null;
+        return false;
+      }
+      return true;
+    });
   }
 
   /**
@@ -678,6 +948,11 @@ export class World {
     // Reset per-frame energy tracking
     this._frameEnergyGained.clear();
 
+    // Apply grab spring + prop-connection forces BEFORE agents integrate so
+    // the forces are consumed by each agent's own Verlet step this frame.
+    this._applyGrabSprings();
+    this._applyPropConnections();
+
     const offspring: Agent[] = [];
 
     let liveCount = this.agents.reduce((n, a) => n + (a.dead ? 0 : 1), 0);
@@ -695,7 +970,7 @@ export class World {
         continue;
       }
 
-      agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield, this.agents);
+      agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield, this.agents, this.props);
 
       if (agent.dead) {
         // Agent died from starvation (energy → 0 inside agent.update()).
@@ -742,8 +1017,18 @@ export class World {
       }
     }
 
+    // Process grab/release/connect actions from brain outputs
+    this._processAgentActions();
+
+    // Integrate prop physics (gravity + constrain) AFTER agent updates so
+    // grab forces applied above are properly included.
+    this._updateProps(dt);
+
     this.agents = this.agents.filter(a => !a.dead);
     this.agents.push(...offspring);
+
+    // Release grabs held by agents that just died
+    this._cleanupDeadAgentGrabs();
 
     // Reseed if population crashes — use random genomes only (not archetypes)
     // so post-crash recovery can explore novel morphologies.
@@ -1093,6 +1378,23 @@ export class World {
     }
 
     return results;
+  }
+
+  // ── Prop accessors for renderer ───────────────────────────────────────────────
+
+  /**
+   * Read-only view of active grab springs for rendering.
+   * Each entry describes a spring linking an agent node to a prop node.
+   */
+  get grabSprings(): ReadonlyArray<{ prop: Prop; agentNode: { pos: { x: number; y: number; z: number } }; agentId: number }> {
+    return this._grabSprings;
+  }
+
+  /**
+   * Read-only view of permanent prop-to-prop structural connections.
+   */
+  get propConnections(): ReadonlyArray<{ propA: Prop; propB: Prop; restLength: number }> {
+    return this._propConnections;
   }
 
   get stats() {
