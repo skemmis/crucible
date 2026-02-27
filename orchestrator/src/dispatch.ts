@@ -356,20 +356,30 @@ export async function handleRound2(issue: GitHubIssue): Promise<void> {
     return;
   }
 
-  console.log(`[dispatch] Round 2 starting for issue #${issue.number}`);
-
-  // ── Round 2: all six agents respond seeing the full thread ────────────────
-  // skipLateGuard=true because Round 1 agents already exist — the late guard
-  // would incorrectly trigger. handleRound2's top-level guards (label + PM count)
-  // are the idempotency mechanism for Round 2.
+  // Check whether Round 2 agents already posted (e.g. from a previous run that
+  // timed out before the PM could post). Count agent comments after the first PM.
   const allComments = await getIssueComments(issue.number);
-  const round2Prompt = buildRound2AgentPrompt(issue, allComments);
-  const agentsPosted = await postAgentResponses(issue.number, round2Prompt, AGENTS, true);
+  const firstPmIdx = allComments.findIndex(c => c.body.trimStart().startsWith('**📋 Product Manager**'));
+  const commentsAfterPm1 = firstPmIdx >= 0 ? allComments.slice(firstPmIdx + 1) : [];
+  const round2AgentsAlreadyPosted =
+    commentsAfterPm1.filter(c => isAgentComment(c.body)).length >= AGENTS.length;
 
-  if (!agentsPosted) {
-    // Shouldn't happen (handleRound2 guards prevent duplicate runs), but be safe
-    console.log(`[dispatch] Issue #${issue.number} — Round 2 agents skipped, aborting PM verdict`);
-    return;
+  if (!round2AgentsAlreadyPosted) {
+    console.log(`[dispatch] Round 2 starting for issue #${issue.number}`);
+
+    // ── Round 2: all six agents respond seeing the full thread ────────────────
+    // skipLateGuard=true because Round 1 agents already exist — the late guard
+    // would incorrectly trigger. handleRound2's top-level guards (label + PM count)
+    // are the idempotency mechanism for Round 2.
+    const round2Prompt = buildRound2AgentPrompt(issue, allComments);
+    const agentsPosted = await postAgentResponses(issue.number, round2Prompt, AGENTS, true);
+
+    if (!agentsPosted) {
+      console.log(`[dispatch] Issue #${issue.number} — Round 2 agents skipped, aborting PM verdict`);
+      return;
+    }
+  } else {
+    console.log(`[dispatch] Issue #${issue.number} — Round 2 agents already posted, skipping to PM verdict`);
   }
 
   // ── PM Round 2 synthesis: call preliminary verdict ────────────────────────
