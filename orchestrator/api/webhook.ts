@@ -131,10 +131,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           labels.includes('consensus-reached') ||
           labels.includes('needs-rework');
 
-        if (isCompletedIssue && /\/discuss\b/i.test(commentBody)) {
-          // Extract the concern: everything after `/discuss` on the same line
-          // plus any subsequent lines.
-          const discussMatch = commentBody.match(/\/discuss\b[^\S\r\n]*([\s\S]*)/i);
+        if (isCompletedIssue && /\/discuss(?:ion)?(?:\s|$)/i.test(commentBody)) {
+          // Extract the concern: everything after `/discuss` or `/discussion`.
+          const discussMatch = commentBody.match(/\/discuss(?:ion)?[^\S\r\n]*([\s\S]*)/i);
           const userConcern = discussMatch?.[1]?.trim() ?? '';
 
           if (userConcern) {
