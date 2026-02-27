@@ -589,6 +589,13 @@ export class World {
   private _applyInterAgentCollision(): void {
     if (this.agents.length < 2) return;
 
+    // ── Reset per-frame impulse accumulators ──────────────────────────────────
+    for (const agent of this.agents) {
+      for (const node of agent.nodes) {
+        node.interAgentImpulse = 0;
+      }
+    }
+
     // ── Build spatial hash ────────────────────────────────────────────────────
     this._collisionHash.clear();
     for (const agent of this.agents) {
@@ -644,6 +651,10 @@ export class World {
           nodeB.acc.x += (halfF * nx) / nodeB.mass;
           nodeB.acc.y += (halfF * ny) / nodeB.mass;
           nodeB.acc.z += (halfF * nz) / nodeB.mass;
+
+          // Record force received for contact damage accounting.
+          nodeA.interAgentImpulse += halfF;
+          nodeB.interAgentImpulse += halfF;
         }
       }
     }
@@ -678,6 +689,9 @@ export class World {
       agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield);
 
       if (agent.dead) {
+        // Agent died from starvation (energy → 0 inside agent.update()).
+        // Deposit a corpse so its remaining energy re-enters the ecosystem.
+        this._depositCorpse(agent);
         liveCount--;
         this.telemetry.recordDeath();
         continue;
@@ -762,6 +776,31 @@ export class World {
     // added here are applied *next* frame via accumulated acc.  This one-frame
     // lag is acceptable at 60 Hz and avoids restructuring the update loop.
     this._applyInterAgentCollision();
+
+    // ── Contact damage ─────────────────────────────────────────────────────────
+    // Inter-agent collision forces drain energy from both parties proportionally
+    // to the total force received.  Both sides are penalised — this breaks up
+    // static blob pile-ups (every agent crammed together pays a metabolic price)
+    // while creating selection for agents that can deliver or absorb force well.
+    //
+    // Rate is intentionally low: light glancing contact barely registers; only
+    // sustained deep overlaps (a true pile-up) meaningfully drain energy.
+    // CONTACT_DAMAGE_RATE is in [energy / (force-unit × second)].
+    const CONTACT_DAMAGE_RATE = 0.001;
+    for (const agent of this.agents) {
+      if (agent.dead) continue;
+      let contactForce = 0;
+      for (const node of agent.nodes) contactForce += node.interAgentImpulse;
+      if (contactForce > 0) {
+        agent.energy -= contactForce * CONTACT_DAMAGE_RATE * dt;
+        if (agent.energy <= 0) {
+          agent.energy = 0;
+          this._depositCorpse(agent);
+          agent.dead = true;
+          this.telemetry.recordDeath();
+        }
+      }
+    }
 
     // Update rolling diversity history every frame (cheap: O(nk))
     const diversity = this._computeGenomeDiversity();

@@ -18,6 +18,14 @@ export class PhysicsNode {
   prevPos: Vec3;
   acc: Vec3;
 
+  /**
+   * Total inter-agent collision force (½ × forceMag) received this frame,
+   * summed across all contacts.  Written by World._applyInterAgentCollision()
+   * and read back in the same update() call to apply contact energy drain.
+   * Reset to 0 at the start of each collision pass.
+   */
+  interAgentImpulse: number = 0;
+
   constructor(
     x: number,
     y: number,
