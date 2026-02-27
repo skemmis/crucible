@@ -448,15 +448,15 @@ export class World {
 
     for (let i = 0; i < archetypeCount; i++) {
       const name = archetypeNames[i % archetypeNames.length];
-      this._spawn(Genome.archetype(name));
+      this._spawn(Genome.archetype(name), undefined, Math.random() * 45);
     }
 
     for (let i = archetypeCount; i < count; i++) {
-      this._spawn(Genome.random());
+      this._spawn(Genome.random(), undefined, Math.random() * 45);
     }
   }
 
-  private _spawn(genome: Genome, parentAgent?: Agent): Agent {
+  private _spawn(genome: Genome, parentAgent?: Agent, preAge = 0): Agent {
     const x = 50 + Math.random() * (this.worldWidth - 100);
     const z = 50 + Math.random() * (this.worldDepth - 100);
     // Spawn on top of the terrain surface at this (x, z) location
@@ -470,6 +470,10 @@ export class World {
       parentAgent?.id ?? null,
       parentAgent?.hue ?? Math.random() * 360,
     );
+    // Pre-age seed agents so the initial cohort doesn't all die simultaneously.
+    // Without this every agent born at t=0 hits the 60 s lifespan cap together,
+    // causing a synchronised mass-extinction wave every minute.
+    a.age = preAge;
     this.agents.push(a);
     this.lineageLog.push([a.id, a.parentId, a.generation, a.birthTime]);
     return a;
@@ -717,37 +721,19 @@ export class World {
         agent.energy -= (agent.energy - 200) * 0.03 * dt;
       }
 
-      // Reproduction — competitive displacement when at capacity.
-      // If there is a free slot, birth normally.  If the world is full,
-      // kill the weakest live agent to make room — energy directly translates
-      // to survival rather than the arbitrary lifespan timer being the only
-      // selection pressure.
-      if (agent.canReproduce()) {
-        if (liveCount + offspring.length < this.maxAgents) {
-          const [sx, sy, sz] = this._offspringSpawn(agent);
-          const child = agent.reproduce(sx, sy, sz);
-          offspring.push(child);
-          this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
-          this.telemetry.recordBirth();
-          // liveCount unchanged: no existing agent died
-        } else {
-          const victim = this._weakestLiveAgent(agent.id);
-          if (victim) {
-            // No corpse for displaced agents — their energy dissipates.
-            // Conservation of energy: only natural deaths (lifespan / starvation)
-            // leave harvestable corpses.  Depositing energy here would let clusters
-            // sustain themselves by eating each other's corpses, bypassing food zones.
-            victim.dead = true;
-            liveCount--;
-            this.telemetry.recordDeath();
-            const [sx, sy, sz] = this._offspringSpawn(agent);
-            const child = agent.reproduce(sx, sy, sz);
-            offspring.push(child);
-            this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
-            this.telemetry.recordBirth();
-            // liveCount net change: -1 death +1 birth = 0
-          }
-        }
+      // Reproduction — only when a slot is free.
+      // Competitive displacement (killing the weakest to make room) was removed
+      // because it systematically killed mobile explorers in transit: those agents
+      // have lower energy than sedentary blob-sitters, so displacement always
+      // targeted them, preventing any locomotion lineage from ever reproducing.
+      // The 60 s lifespan already provides ~1 slot/second of natural turnover;
+      // that is sufficient selection pressure without a separate eviction rule.
+      if (agent.canReproduce() && liveCount + offspring.length < this.maxAgents) {
+        const [sx, sy, sz] = this._offspringSpawn(agent);
+        const child = agent.reproduce(sx, sy, sz);
+        offspring.push(child);
+        this.lineageLog.push([child.id, child.parentId, child.generation, child.birthTime]);
+        this.telemetry.recordBirth();
       }
     }
 

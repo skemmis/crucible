@@ -307,7 +307,11 @@ export class Agent {
   }
 
   canReproduce(): boolean {
-    return this.energy > 160 && this.age > 3;
+    // Threshold lowered 160 → 130 so mobile agents that reach a food patch
+    // can reproduce without needing to sit and hoard.  Reproduction costs 80
+    // energy, leaving the parent with ~50 — below starvation threshold but
+    // survivable if they quickly find more food.
+    return this.energy > 130 && this.age > 3;
   }
 
   reproduce(spawnX?: number, spawnY?: number, spawnZ?: number): Agent {
