@@ -152,62 +152,44 @@ const BIRTH_DEATH_GATE_HI = 1.15;
 
 // ── Kinship interaction constants ─────────────────────────────────────────────
 
-/**
- * XZ radius within which two agents can sense each other's kinship.
- * Chosen to be roughly 2–3× a typical agent's bounding radius so that
- * adjacent agents in the same feeding patch will interact.
- */
 const KINSHIP_INTERACT_RADIUS = 120;
-
-/**
- * Minimum kinship score required for cooperative energy transfer to occur.
- * Below this threshold the two agents are too genetically distant to be
- * considered kin — no transfer happens.
- *
- * At KINSHIP_SCALE = 35 (parent→child distance):
- *   kinship ≈ 0.37 for a first-generation child
- *   kinship ≈ 0.14 for a grandchild
- *   threshold 0.25 ≈ ~1.4 generations of drift
- */
 const KINSHIP_THRESHOLD = 0.25;
-
-/**
- * Fraction of the energy difference transferred per tick.
- * Kept small so the effect is a gentle pressure toward equalisation, not
- * an instant levelling of energy across a kin cluster.
- *
- * At 60 Hz and a difference of 100 energy units:
- *   transfer = 100 × 0.04 × kinship ≤ 4 units/tick  (bounded by kinship < 1)
- */
 const KINSHIP_TRANSFER_RATE = 0.04;
 
 // ── Inter-agent collision constants ───────────────────────────────────────────
 
-/**
- * Stiffness of the repulsion force applied when nodes from different agents
- * overlap.  Kept lower than intra-agent spring stiffness (150–550) to avoid
- * violent impulses when agents collide at speed.
- *
- * Value chosen so a head-on overlap of one full node radius (≈ 6 units)
- * produces a force comparable to a mid-stiffness muscle spring.
- */
 const INTER_AGENT_REPULSION_STIFFNESS = 120;
 
 // ── Archetype seeding constants ───────────────────────────────────────────────
 
-/**
- * Fraction of generation-0 agents that are seeded from archetypes.
- * The rest are random as before so morphospace exploration isn't fully
- * constrained to archetype basins from the start.
- *
- * With DEFAULT_CONFIG.initialAgents = 16:
- *   floor(16 × 0.625) = 10 archetype agents
- *   6 random agents
- *
- * The archetypes are drawn round-robin across the three types so each
- * type is represented roughly equally.
- */
 const ARCHETYPE_SEED_FRACTION = 0.625;
+
+// ── Chemical signal constants (Proposal #5) ───────────────────────────────────
+
+/**
+ * Maximum XZ radius within which an agent can sense chemical signal from others.
+ *
+ * Agents outside this radius contribute nothing to the local concentration.
+ * Chosen to be roughly one typical foraging radius (~150 units) so signal
+ * range matches the spatial scale of food-finding behaviour.
+ */
+const CHEM_SENSE_RADIUS = 200;
+
+/**
+ * Distance falloff scale for the chemical concentration formula.
+ *
+ * Local concentration from a single emitter at distance d:
+ *   contribution = emissionRate / (d + CHEM_FALLOFF_SCALE)
+ *
+ * At d=0 (on top of the emitter): contribution = rate / CHEM_FALLOFF_SCALE
+ * At d=CHEM_FALLOFF_SCALE (50 units away): contribution = rate / 100 (half)
+ *
+ * This is a fast inverse-distance falloff — no grid, no diffusion pass,
+ * derived purely from the existing agent positions each tick.
+ * Consensus (Systems Engineer): profile spatial-query approximation first;
+ * only add persistent grid if this proves qualitatively insufficient.
+ */
+const CHEM_FALLOFF_SCALE = 50;
 
 // ── Telemetry tracker (lives inside World, updated each step) ─────────────────
 
@@ -283,25 +265,16 @@ class TelemetryTracker {
     this._lastSnapshotDiversity = value;
   }
 
-  /**
-   * Record maxGeneration at snapshot time.
-   * Returns true if maxGeneration has strictly increased over the retention window
-   * (i.e. at least one value in the history is lower than the current value).
-   */
   recordMaxGeneration(value: number): boolean {
     this._maxGenHistory.push(value);
     if (this._maxGenHistory.length > MAX_GEN_HISTORY_LEN) {
       this._maxGenHistory.shift();
     }
-    if (this._maxGenHistory.length < 2) return true; // not enough data — give benefit of doubt
+    if (this._maxGenHistory.length < 2) return true;
     const earliest = this._maxGenHistory[0];
     return value > earliest;
   }
 
-  /**
-   * Record a non-null complexity score.
-   * Returns { variance, autocorrelation } over the rolling window.
-   */
   recordComplexityScore(score: number): { variance: number; autocorrelation: number } {
     this._scoreHistory.push(score);
     if (this._scoreHistory.length > SCORE_HISTORY_LEN) {
@@ -313,10 +286,6 @@ class TelemetryTracker {
     };
   }
 
-  /**
-   * Returns the latest variance / autocorrelation values (for null-score snapshots
-   * where we still want to report the rolling stats from prior snapshots).
-   */
   getScoreStats(): { variance: number; autocorrelation: number } {
     return {
       variance: this._computeScoreVariance(),
@@ -333,7 +302,6 @@ class TelemetryTracker {
   }
 
   private _computeScoreAutocorrelation(): number {
-    // Lag-1 Pearson correlation between h[0..n-2] and h[1..n-1]
     const h = this._scoreHistory;
     const n = h.length;
     if (n < 3) return 0;
@@ -363,10 +331,10 @@ class TelemetryTracker {
     }
     const b = this._baseline.get(metric)!;
     b.values.push(value);
-    if (b.values.length > 50) b.values.shift(); // rolling 50-sample baseline
+    if (b.values.length > 50) b.values.shift();
 
     const n = b.values.length;
-    if (n < 5) return null; // not enough data yet
+    if (n < 5) return null;
 
     const mean = b.values.reduce((s, v) => s + v, 0) / n;
     const variance = b.values.reduce((s, v) => s + (v - mean) ** 2, 0) / n;
@@ -383,35 +351,13 @@ class TelemetryTracker {
   }
 }
 
-// ── World ─────────────────────────────────────────────────────────────────────
-
 // ── Prop manipulation constants ───────────────────────────────────────────────
 
-/** Number of props scattered across the world at construction. */
 const PROP_COUNT = 40;
-
-/**
- * Distance beyond the sum of an agent-node radius and a prop radius within
- * which a grab action will attach a spring between them.
- */
 const GRAB_RANGE = 25;
-
-/** Spring stiffness pulling a grabbed prop toward its carrying node. */
 const GRAB_STIFFNESS = 180;
-
-/**
- * Maximum number of props one agent may carry simultaneously.
- * Two is the minimum needed to connect two props together.
- */
 const MAX_GRABS_PER_AGENT = 2;
-
-/**
- * Maximum world-unit distance between two carried props for the connect
- * action to form a spring between them.
- */
 const CONNECT_RANGE = 80;
-
-/** Spring stiffness for prop-to-prop structural connections. */
 const CONNECT_STIFFNESS = 120;
 
 // ── World ─────────────────────────────────────────────────────────────────────
@@ -431,21 +377,12 @@ export class World {
   /** Manipulable environmental objects agents can grab, connect, and release. */
   props: Prop[] = [];
 
-  /**
-   * Active grab springs: each entry links an agent node to a prop node with
-   * a spring force applied each frame.  Agents hold props via these springs.
-   */
   private _grabSprings: Array<{
     prop: Prop;
     agentNode: PhysicsNode;
     agentId: number;
   }> = [];
 
-  /**
-   * Permanent structural connections between props, created when an agent
-   * triggers the "connect" action while carrying two props close together.
-   * These persist even after the agent releases the props, enabling built structures.
-   */
   private _propConnections: Array<{
     propA: Prop;
     propB: Prop;
@@ -461,14 +398,8 @@ export class World {
   readonly telemetry: TelemetryTracker = new TelemetryTracker();
 
   // Per-agent energy gained in the current frame (keyed by agent id)
-  // Used to compute energy-acquisition variance for the crowding diagnostic
   private _frameEnergyGained: Map<number, number> = new Map();
 
-  /**
-   * Reusable spatial hash for inter-agent collision broad phase.
-   * Rebuilt each frame — clear() + insert is O(total_nodes).
-   * Cell size: see SpatialHash.ts for tuning notes.
-   */
   private _collisionHash: SpatialHash = new SpatialHash(COLLISION_CELL_SIZE);
 
   constructor(cfg: WorldConfig) {
@@ -476,7 +407,6 @@ export class World {
     this.worldWidth = cfg.worldWidth;
     this.worldDepth = cfg.worldDepth;
     this.maxAgents = cfg.maxAgents;
-    // Heightfield must be baked first — Environment uses it to place ground zones.
     this.heightfield = new Heightfield(
       cfg.worldWidth,
       cfg.worldDepth,
@@ -495,16 +425,6 @@ export class World {
     this._seedInitialPopulation(cfg.initialAgents);
   }
 
-  /**
-   * Seed the generation-0 population with a mix of archetype genomes and
-   * random genomes.  Archetypes are guaranteed to have functional body plans
-   * that can locomote; random genomes fill the remainder to preserve
-   * morphospace exploration.
-   *
-   * Archetype fraction: ARCHETYPE_SEED_FRACTION of initialAgents, rounded down.
-   * The archetypes cycle round-robin across worm / quad / tripod so each type
-   * is seeded at roughly equal frequency.
-   */
   private _seedInitialPopulation(count: number): void {
     const archetypeCount = Math.floor(count * ARCHETYPE_SEED_FRACTION);
     const archetypeNames: ArchetypeName[] = ['worm', 'quad', 'tripod'];
@@ -522,50 +442,32 @@ export class World {
   private _spawn(genome: Genome, parentAgent?: Agent, preAge = 0): Agent {
     const x = 50 + Math.random() * (this.worldWidth - 100);
     const z = 50 + Math.random() * (this.worldDepth - 100);
-    // Spawn on top of the terrain surface at this (x, z) location
     const groundY = this.heightfield.heightAt(x, z);
     const a = new Agent(
       genome,
       x,
-      groundY,   // _develop() lifts body above this height
+      groundY,
       z,
       parentAgent?.generation ?? 0,
       parentAgent?.id ?? null,
       parentAgent?.hue ?? Math.random() * 360,
     );
-    // Pre-age seed agents so the initial cohort doesn't all die simultaneously.
-    // Without this every agent born at t=0 hits the 60 s lifespan cap together,
-    // causing a synchronised mass-extinction wave every minute.
     a.age = preAge;
     this.agents.push(a);
     this.lineageLog.push([a.id, a.parentId, a.generation, a.birthTime]);
     return a;
   }
 
-  /**
-   * Deposit a corpse energy depot for a dying agent if it has meaningful energy.
-   * The corpse is placed at ground level directly below the agent's centre
-   * so that ground-level scavengers can reach it without needing height.
-   */
   private _depositCorpse(agent: Agent): void {
     const c = agent.centerPos;
     const groundY = this.heightfield.heightAt(c.x, c.z);
     this.env.addCorpse(c.x, groundY, c.z, agent.energy);
   }
 
-  /**
-   * Pick a spawn position for an offspring: a random direction from the
-   * parent's centre at 80–120 world units, clamped to world bounds.
-   * Returns [spawnX, spawnY, spawnZ] where spawnY is the terrain height.
-   *
-   * This deliberately scatters children well outside the parent's body
-   * (body radius ~25–50 units) to prevent blob pile-ups where offspring
-   * are born on top of each other and never disperse.
-   */
   private _offspringSpawn(parent: Agent): [number, number, number] {
     const c = parent.centerPos;
     const angle = Math.random() * Math.PI * 2;
-    const dist  = 80 + Math.random() * 40;          // 80–120 units
+    const dist  = 80 + Math.random() * 40;
     const margin = 40;
     const sx = Math.max(margin, Math.min(this.worldWidth  - margin, c.x + Math.cos(angle) * dist));
     const sz = Math.max(margin, Math.min(this.worldDepth - margin, c.z + Math.sin(angle) * dist));
@@ -573,11 +475,6 @@ export class World {
     return [sx, sy, sz];
   }
 
-  /**
-   * Return the live agent with the lowest energy, excluding the given id.
-   * Used for competitive displacement: when a fit agent reproduces into a
-   * full world, the weakest incumbent is evicted to make room.
-   */
   private _weakestLiveAgent(excludeId: number): Agent | null {
     let weakest: Agent | null = null;
     let minEnergy = Infinity;
@@ -591,13 +488,78 @@ export class World {
     return weakest;
   }
 
-  // ── Prop lifecycle ────────────────────────────────────────────────────────────
+  // ── Chemical signal layer (Proposal #5) ──────────────────────────────────────
 
   /**
-   * Scatter PROP_COUNT props across the terrain at construction.  Props are
-   * placed directly on the terrain surface (node Y = groundY + radius) and
-   * spread evenly across all four types in round-robin order.
+   * Compute local chemical concentration for every live agent using the
+   * spatial-query approximation.
+   *
+   * For each agent A, sums contributions from all other live agents B within
+   * CHEM_SENSE_RADIUS, weighted by inverse XZ distance with a falloff scale:
+   *
+   *   concentration_A += B.genome.chemEmissionRate / (dist_AB + CHEM_FALLOFF_SCALE)
+   *
+   * Architecture rationale (Proposal #5 consensus, Systems Engineer):
+   *   - No persistent diffusion grid is maintained.
+   *   - The "field" is a derived quantity computed on demand each tick.
+   *   - Signal does not persist after its emitter moves — this trades spatial
+   *     history for zero grid overhead.
+   *   - If territory-marking behavior requires persistence, a grid can be
+   *     added later; for aggregation and gradient-following emergence this
+   *     approximation is architecturally simpler.
+   *
+   * Complexity: O(n²) in agent count.  With n ≤ 60, worst case is 3 540
+   * pairwise checks per tick — negligible vs. spring physics.
+   *
+   * Signal is shared across ALL agents regardless of lineage (single shared
+   * field, not species-private channels).  Cross-lineage exploitation (e.g.
+   * predators following prey signals) is an emergent property to observe,
+   * not to design around.
    */
+  private _computeChemicalConcentrations(): void {
+    const n = this.agents.length;
+    if (n < 2) {
+      // Single agent — nothing to sense
+      for (const a of this.agents) a.localChemConcentration = 0;
+      return;
+    }
+
+    const radiusSq = CHEM_SENSE_RADIUS * CHEM_SENSE_RADIUS;
+
+    for (let i = 0; i < n; i++) {
+      const agentA = this.agents[i];
+      if (agentA.dead) {
+        agentA.localChemConcentration = 0;
+        continue;
+      }
+      const ca = agentA.centerPos;
+      let concentration = 0;
+
+      for (let j = 0; j < n; j++) {
+        if (j === i) continue;
+        const agentB = this.agents[j];
+        if (agentB.dead) continue;
+
+        // Skip emitters with zero (or near-zero) rate — contributes nothing
+        if (agentB.genome.chemEmissionRate < 1e-6) continue;
+
+        const cb = agentB.centerPos;
+        const dx = ca.x - cb.x;
+        const dz = ca.z - cb.z;
+        const distSq = dx * dx + dz * dz;
+
+        if (distSq > radiusSq) continue;
+
+        const dist = Math.sqrt(distSq);
+        concentration += agentB.genome.chemEmissionRate / (dist + CHEM_FALLOFF_SCALE);
+      }
+
+      agentA.localChemConcentration = concentration;
+    }
+  }
+
+  // ── Prop lifecycle ────────────────────────────────────────────────────────────
+
   private _initProps(): void {
     for (let i = 0; i < PROP_COUNT; i++) {
       const type = PROP_TYPES[i % PROP_TYPES.length];
@@ -609,16 +571,6 @@ export class World {
     }
   }
 
-  /**
-   * Apply grab spring forces to both the carrying agent node (reaction) and
-   * the prop node (pull).  Must be called BEFORE agent.update() so the
-   * forces are consumed by the agent's own Verlet integration step.
-   *
-   * Physics: a zero-damping spring with rest length = nodeRadius + propRadius
-   * (just touching) pulls the prop toward the carrying node.  The prop's
-   * weight creates a reaction force on the agent node that slows locomotion —
-   * heavier prop types are genuinely harder to carry.
-   */
   private _applyGrabSprings(): void {
     for (const gs of this._grabSprings) {
       const an = gs.agentNode;
@@ -631,32 +583,25 @@ export class World {
       if (distSq < 1e-9) continue;
       const dist = Math.sqrt(distSq);
 
-      // Spring rest length: just touching (no overlap)
       const restLen = an.radius + pn.radius;
       const stretch = dist - restLen;
-      if (stretch <= 0) continue; // already within target distance
+      if (stretch <= 0) continue;
 
       const forceMag = stretch * GRAB_STIFFNESS;
       const nx = dx / dist;
       const ny = dy / dist;
       const nz = dz / dist;
 
-      // Pull prop toward the agent node
       pn.acc.x -= (forceMag * nx) / pn.mass;
       pn.acc.y -= (forceMag * ny) / pn.mass;
       pn.acc.z -= (forceMag * nz) / pn.mass;
 
-      // Reaction on agent node (heavier props resist more)
       an.acc.x += (forceMag * nx) / an.mass;
       an.acc.y += (forceMag * ny) / an.mass;
       an.acc.z += (forceMag * nz) / an.mass;
     }
   }
 
-  /**
-   * Apply spring forces between prop-pairs that have been connected by agents.
-   * Must be called BEFORE _updateProps() so forces are consumed by prop integration.
-   */
   private _applyPropConnections(): void {
     for (const conn of this._propConnections) {
       const pA = conn.propA.node;
@@ -684,11 +629,6 @@ export class World {
     }
   }
 
-  /**
-   * Integrate prop physics: gravity → integrate → ground & world constraint.
-   * Must be called AFTER _applyGrabSprings() and _applyPropConnections() so
-   * those accumulated forces are included in the Verlet step.
-   */
   private _updateProps(dt: number): void {
     const G = 600;
     for (const prop of this.props) {
@@ -700,21 +640,10 @@ export class World {
     }
   }
 
-  /**
-   * Process each live agent's grab / release / connect action outputs.
-   * Must run AFTER agent.update() (which sets the lastXxxAction fields).
-   *
-   * Grab   (> 0.5): attach a spring to the nearest unclaimed prop within
-   *                 GRAB_RANGE + combined radii, up to MAX_GRABS_PER_AGENT.
-   * Release(> 0.5): detach all props this agent is carrying.
-   * Connect(> 0.5): if carrying two props within CONNECT_RANGE, link them
-   *                 with a permanent structural spring.
-   */
   private _processAgentActions(): void {
     for (const agent of this.agents) {
       if (agent.dead) continue;
 
-      // Release: detach all carried props before potentially re-grabbing
       if (agent.lastReleaseAction > 0.5) {
         this._grabSprings = this._grabSprings.filter(gs => {
           if (gs.agentId === agent.id) {
@@ -725,7 +654,6 @@ export class World {
         });
       }
 
-      // Grab: attach nearest unclaimed prop within range
       if (agent.lastGrabAction > 0.5) {
         const agentGrabCount = this._grabSprings.filter(gs => gs.agentId === agent.id).length;
         if (agentGrabCount < MAX_GRABS_PER_AGENT) {
@@ -734,7 +662,7 @@ export class World {
           let nearestNode: PhysicsNode | null = null;
 
           for (const prop of this.props) {
-            if (prop.carriedBy !== null) continue; // already claimed
+            if (prop.carriedBy !== null) continue;
 
             for (const an of agent.nodes) {
               const dx = prop.node.pos.x - an.pos.x;
@@ -761,7 +689,6 @@ export class World {
         }
       }
 
-      // Connect: link two currently-carried props with a structural spring
       if (agent.lastConnectAction > 0.5) {
         const carriedGrabs = this._grabSprings.filter(gs => gs.agentId === agent.id);
         for (let i = 0; i < carriedGrabs.length; i++) {
@@ -769,7 +696,6 @@ export class World {
             const pA = carriedGrabs[i].prop;
             const pB = carriedGrabs[j].prop;
 
-            // Skip if already connected
             const alreadyLinked = this._propConnections.some(
               c => (c.propA === pA && c.propB === pB) || (c.propA === pB && c.propB === pA),
             );
@@ -788,10 +714,6 @@ export class World {
     }
   }
 
-  /**
-   * Remove grab springs whose carrying agent has died.
-   * Called after dead agents are pruned from this.agents.
-   */
   private _cleanupDeadAgentGrabs(): void {
     const liveIds = new Set(this.agents.map(a => a.id));
     this._grabSprings = this._grabSprings.filter(gs => {
@@ -803,17 +725,6 @@ export class World {
     });
   }
 
-  /**
-   * Apply local kin-selection cooperative energy transfer.
-   *
-   * For each live pair of agents within KINSHIP_INTERACT_RADIUS (XZ plane),
-   * compute their genome kinship score.  If it exceeds KINSHIP_THRESHOLD, the
-   * richer agent transfers a small fraction of the energy difference to the
-   * poorer kin — cooperative resource-sharing driven by genetic relatedness.
-   *
-   * Complexity: O(n²) in agent count, but n ≤ maxAgents (60) so the worst case
-   * is ~1 800 pairwise checks per tick — negligible vs. physics.
-   */
   private _applyKinshipInteractions(): void {
     const n = this.agents.length;
     if (n < 2) return;
@@ -850,32 +761,15 @@ export class World {
     }
   }
 
-  /**
-   * Apply sphere-sphere repulsion between nodes belonging to *different* agents.
-   *
-   * Uses a spatial hash for the broad phase so the effective cost is O(n × k)
-   * where k is the average number of nodes per hash cell (typically 1–3 at
-   * target densities) rather than O(n²) over all node pairs.
-   *
-   * Physics: when two nodes from different agents overlap (distance < r_a + r_b),
-   * a linear repulsion force is applied along the separation axis — identical
-   * in form to a zero-rest-length spring.  This pushes agents out of each other
-   * without any attraction, creating clean physical exclusion.
-   *
-   * Energy is not deducted for inter-agent repulsion (it is a contact normal
-   * force, not a metabolic cost).
-   */
   private _applyInterAgentCollision(): void {
     if (this.agents.length < 2) return;
 
-    // ── Reset per-frame impulse accumulators ──────────────────────────────────
     for (const agent of this.agents) {
       for (const node of agent.nodes) {
         node.interAgentImpulse = 0;
       }
     }
 
-    // ── Build spatial hash ────────────────────────────────────────────────────
     this._collisionHash.clear();
     for (const agent of this.agents) {
       for (const node of agent.nodes) {
@@ -883,20 +777,13 @@ export class World {
       }
     }
 
-    // ── Narrow phase: repulsion ───────────────────────────────────────────────
     for (const agent of this.agents) {
       for (const nodeA of agent.nodes) {
-        // Query radius = max possible sum of two node radii.
-        // Node radii range ~4–9 so 18 is a safe upper bound for the query.
         const queryR = 18;
         const candidates = this._collisionHash.query(nodeA.pos.x, nodeA.pos.z, queryR);
 
         for (const { node: nodeB, agentId: bId } of candidates) {
-          // Only collide nodes from different agents
           if (bId === agent.id) continue;
-          // Avoid double-counting: only process pair once (lower agent id acts)
-          // We can't easily enforce this with the hash, so we apply half-force
-          // to each side (Newton's third law is satisfied by symmetry).
 
           const dx = nodeB.pos.x - nodeA.pos.x;
           const dy = nodeB.pos.y - nodeA.pos.y;
@@ -910,17 +797,12 @@ export class World {
           const overlap = minDist - dist;
           const invDist = 1 / dist;
 
-          // Repulsion magnitude proportional to overlap (linear spring, zero rest length)
           const forceMag = overlap * INTER_AGENT_REPULSION_STIFFNESS;
 
-          // Normalised separation axis (A → B direction = push B away from A)
           const nx = dx * invDist;
           const ny = dy * invDist;
           const nz = dz * invDist;
 
-          // Apply equal and opposite forces.
-          // Half to each side so we don't double-apply when we encounter the
-          // symmetric pair (nodeB's agent will also process this pair).
           const halfF = forceMag * 0.5;
 
           nodeA.acc.x -= (halfF * nx) / nodeA.mass;
@@ -931,7 +813,6 @@ export class World {
           nodeB.acc.y += (halfF * ny) / nodeB.mass;
           nodeB.acc.z += (halfF * nz) / nodeB.mass;
 
-          // Record force received for contact damage accounting.
           nodeA.interAgentImpulse += halfF;
           nodeB.interAgentImpulse += halfF;
         }
@@ -948,8 +829,12 @@ export class World {
     // Reset per-frame energy tracking
     this._frameEnergyGained.clear();
 
-    // Apply grab spring + prop-connection forces BEFORE agents integrate so
-    // the forces are consumed by each agent's own Verlet step this frame.
+    // ── Chemical concentrations ────────────────────────────────────────────────
+    // Compute before agent.update() so the sensor is current when the brain runs.
+    // Uses the existing agent positions — no separate grid, no diffusion pass.
+    this._computeChemicalConcentrations();
+
+    // Apply grab spring + prop-connection forces BEFORE agents integrate
     this._applyGrabSprings();
     this._applyPropConnections();
 
@@ -960,8 +845,6 @@ export class World {
     for (const agent of this.agents) {
       if (agent.dead) continue;
 
-      // Max lifespan: forces generational turnover.
-      // 60s (down from 180s) tightens the selection cycle ~3×.
       if (agent.age > 60) {
         this._depositCorpse(agent);
         agent.dead = true;
@@ -973,15 +856,13 @@ export class World {
       agent.update(dt, this.env.zones, this.worldWidth, this.worldDepth, this.heightfield, this.agents, this.props);
 
       if (agent.dead) {
-        // Agent died from starvation (energy → 0 inside agent.update()).
-        // Deposit a corpse so its remaining energy re-enters the ecosystem.
         this._depositCorpse(agent);
         liveCount--;
         this.telemetry.recordDeath();
         continue;
       }
 
-      // Energy harvesting: each node that overlaps a zone or corpse absorbs energy
+      // Energy harvesting
       let frameGained = 0;
       for (const node of agent.nodes) {
         const gained = this.env.harvest(node.pos.x, node.pos.y, node.pos.z, node.radius);
@@ -993,21 +874,11 @@ export class World {
       }
       this._frameEnergyGained.set(agent.id, frameGained);
 
-      // Energy decay: surplus above 200 bleeds off at 3 % per second.
-      // Prevents passive hoarding — a sitter capped at 300 loses 3 energy/s
-      // of surplus, so staying well-fed requires ongoing harvesting rather
-      // than a one-time fill.
+      // Energy decay: surplus above 200 bleeds off at 3% per second
       if (agent.energy > 200) {
         agent.energy -= (agent.energy - 200) * 0.03 * dt;
       }
 
-      // Reproduction — only when a slot is free.
-      // Competitive displacement (killing the weakest to make room) was removed
-      // because it systematically killed mobile explorers in transit: those agents
-      // have lower energy than sedentary blob-sitters, so displacement always
-      // targeted them, preventing any locomotion lineage from ever reproducing.
-      // The 60 s lifespan already provides ~1 slot/second of natural turnover;
-      // that is sufficient selection pressure without a separate eviction rule.
       if (agent.canReproduce() && liveCount + offspring.length < this.maxAgents) {
         const [sx, sy, sz] = this._offspringSpawn(agent);
         const child = agent.reproduce(sx, sy, sz);
@@ -1017,21 +888,14 @@ export class World {
       }
     }
 
-    // Process grab/release/connect actions from brain outputs
     this._processAgentActions();
-
-    // Integrate prop physics (gravity + constrain) AFTER agent updates so
-    // grab forces applied above are properly included.
     this._updateProps(dt);
 
     this.agents = this.agents.filter(a => !a.dead);
     this.agents.push(...offspring);
 
-    // Release grabs held by agents that just died
     this._cleanupDeadAgentGrabs();
 
-    // Reseed if population crashes — use random genomes only (not archetypes)
-    // so post-crash recovery can explore novel morphologies.
     if (this.agents.length < 4) {
       const toAdd = Math.min(6, this.maxAgents - this.agents.length);
       for (let i = 0; i < toAdd; i++) {
@@ -1039,34 +903,9 @@ export class World {
       }
     }
 
-    // Kinship interactions: kin-selection cooperative energy transfer.
-    // Runs after all births/deaths are resolved so the live agent list is stable.
     this._applyKinshipInteractions();
-
-    // Inter-agent collision: sphere-sphere repulsion between nodes on different
-    // agents.  Runs after agent.update() (which accumulates spring forces and
-    // gravity) so collision repulsion is added on top of intra-agent forces,
-    // then integration happens inside each agent's own update call.
-    //
-    // NOTE: agent.update() integrates its own nodes, so inter-agent forces
-    // added here are applied *next* frame via accumulated acc.  This one-frame
-    // lag is acceptable at 60 Hz and avoids restructuring the update loop.
     this._applyInterAgentCollision();
 
-    // ── Physical death by impact ───────────────────────────────────────────────
-    // Contact is a binary physics event, not a metabolic tax.  If the total
-    // inter-agent impulse received across all of an agent's nodes in a single
-    // frame exceeds CONTACT_DEATH_THRESHOLD, the agent dies instantly and drops
-    // a corpse.  Below the threshold, contact has no lasting effect.
-    //
-    // Threshold intuition (stiffness = 120, halfF = overlap × 60):
-    //   gentle nudge   — 1 node, overlap 2 → 120   (safe)
-    //   glancing bump  — 3 nodes, overlap 3 → 540   (safe)
-    //   real crush     — 4 nodes, overlap 5 → 1200  (lethal ✓)
-    //   pile-up centre — many nodes deep   → 3000+  (lethal ✓)
-    //
-    // This creates selection for structural resilience and aggressive body plans
-    // without penalising incidental locomotion contact.
     const CONTACT_DEATH_THRESHOLD = 800;
     for (const agent of this.agents) {
       if (agent.dead) continue;
@@ -1079,7 +918,6 @@ export class World {
       }
     }
 
-    // Update rolling diversity history every frame (cheap: O(nk))
     const diversity = this._computeGenomeDiversity();
     this.telemetry.recordDiversity(diversity);
   }
@@ -1382,17 +1220,10 @@ export class World {
 
   // ── Prop accessors for renderer ───────────────────────────────────────────────
 
-  /**
-   * Read-only view of active grab springs for rendering.
-   * Each entry describes a spring linking an agent node to a prop node.
-   */
   get grabSprings(): ReadonlyArray<{ prop: Prop; agentNode: { pos: { x: number; y: number; z: number } }; agentId: number }> {
     return this._grabSprings;
   }
 
-  /**
-   * Read-only view of permanent prop-to-prop structural connections.
-   */
   get propConnections(): ReadonlyArray<{ propA: Prop; propB: Prop; restLength: number }> {
     return this._propConnections;
   }
