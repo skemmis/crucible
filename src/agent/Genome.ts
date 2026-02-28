@@ -21,7 +21,7 @@ export interface SpringGene {
 }
 
 /**
- * Sensor input layout — 22 inputs.
+ * Sensor input layout — 23 inputs.
  *
  * This layout is the single source of truth for what agents can perceive.
  * Every slot is listed here; no sense is silently "always on" or scattered
@@ -32,6 +32,7 @@ export interface SpringGene {
  * Slots 14–15 are terrain-sensing inputs.
  * Slots 16–18 are nearest-agent sensing inputs.
  * Slots 19–21 are nearest-prop sensing inputs (manipulable objects).
+ * Slot  22    is the chemical signal layer (Proposal #5).
  *
  * Slot | Signal                        | Range   | Notes
  * -----|-------------------------------|---------|------------------------------
@@ -59,8 +60,11 @@ export interface SpringGene {
  * 19   | Nearest prop direction X     | [-1, 1] | tanh-normalised direction to nearest prop.
  * 20   | Nearest prop direction Z     | [-1, 1] | tanh-normalised direction to nearest prop.
  * 21   | Nearest prop distance        | [0, 1]  | tanh(dist / 200). 0 = on top of it.
+ * 22   | Local chemical concentration | [0, 1]  | tanh of summed nearby agent emissions
+ *      |                               |         | weighted by inverse distance. Proposal #5.
+ *      |                               |         | No gradient — point sample only.
  */
-export const SENSOR_COUNT = 22;
+export const SENSOR_COUNT = 23;
 
 /**
  * Number of extra output neurons appended after the muscle outputs.
@@ -114,11 +118,30 @@ export type ArchetypeName = 'worm' | 'quad' | 'tripod';
  */
 const NODE_POSITION_SIGMA = 5;
 
+/**
+ * Sigma for chemEmissionRate mutation.
+ *
+ * At sigma=0.15 a typical parent-child step is ~0.1 in emission rate,
+ * allowing gradual evolution without resetting the signal channel each
+ * generation.  Rate is clamped to [0, 2].
+ */
+const CHEM_EMISSION_SIGMA = 0.15;
+
 export class Genome {
   constructor(
     public nodes: NodeGene[],
     public springs: SpringGene[],
     public brain: NeuralNet,
+    /**
+     * Chemical emission rate — genome-encoded, fully evolvable.
+     * NOT coupled to energy surplus; what agents emit (and whether honest
+     * signaling emerges) is left entirely to selection pressure.
+     *
+     * Range [0, 2].  Emitting costs energy each tick at a rate proportional
+     * to this value (see CHEM_EMISSION_COST_RATE in Agent.ts).
+     * Proposal #5 consensus: evolvable emission with real metabolic cost.
+     */
+    public chemEmissionRate: number = 0.5,
   ) {}
 
   // ─── Factory ────────────────────────────────────────────────────────────────
@@ -150,7 +173,9 @@ export class Genome {
 
     const muscleCount = Math.max(1, springs.filter(s => s.isActuated).length);
     const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount + ACTION_OUTPUT_COUNT);
-    return new Genome(nodes, springs, brain);
+    // Random initial emission rate — evolution will select for whatever is fit
+    const chemEmissionRate = Math.random() * 1.5;
+    return new Genome(nodes, springs, brain, chemEmissionRate);
   }
 
   // ─── Archetypes ─────────────────────────────────────────────────────────────
@@ -210,7 +235,7 @@ export class Genome {
 
     const muscleCount = springs.filter(s => s.isActuated).length; // 4
     const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount + ACTION_OUTPUT_COUNT);
-    return new Genome(nodes, springs, brain);
+    return new Genome(nodes, springs, brain, 0.5);
   }
 
   // ── Quad ────────────────────────────────────────────────────────────────────
@@ -236,7 +261,7 @@ export class Genome {
 
     const muscleCount = springs.filter(s => s.isActuated).length; // 4
     const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount + ACTION_OUTPUT_COUNT);
-    return new Genome(nodes, springs, brain);
+    return new Genome(nodes, springs, brain, 0.5);
   }
 
   // ── Tripod ──────────────────────────────────────────────────────────────────
@@ -258,7 +283,7 @@ export class Genome {
 
     const muscleCount = springs.filter(s => s.isActuated).length; // 3
     const brain = new NeuralNet(SENSOR_COUNT, HIDDEN_SIZE, muscleCount + ACTION_OUTPUT_COUNT);
-    return new Genome(nodes, springs, brain);
+    return new Genome(nodes, springs, brain, 0.5);
   }
 
   // ─── Private spring helper ───────────────────────────────────────────────────
@@ -344,7 +369,13 @@ export class Genome {
 
     const newMuscleCount = Math.max(1, newSprings.filter(s => s.isActuated).length);
     const newBrain = this.brain.mutate(0.14, newMuscleCount + ACTION_OUTPUT_COUNT);
-    return new Genome(newNodes, newSprings, newBrain);
+
+    // Mutate chemical emission rate — clamped to [0, 2]
+    const newChemEmissionRate = Math.max(0, Math.min(2,
+      this.chemEmissionRate + (Math.random() - 0.5) * CHEM_EMISSION_SIGMA,
+    ));
+
+    return new Genome(newNodes, newSprings, newBrain, newChemEmissionRate);
   }
 
   /**
@@ -402,6 +433,7 @@ export class Genome {
       this.nodes.map(n => ({ ...n })),
       this.springs.map(s => ({ ...s })),
       new NeuralNet(this.brain.inputSize, this.brain.hiddenSize, this.brain.outputSize, this.brain.serialize()),
+      this.chemEmissionRate,
     );
   }
 }

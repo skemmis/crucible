@@ -20,6 +20,23 @@ function hueFromGeneration(baseHue: number): number {
   return (baseHue + (Math.random() - 0.5) * 30 + 360) % 360;
 }
 
+/**
+ * Energy cost per unit of chemEmissionRate per second.
+ *
+ * Consensus requirement: emission must have a real metabolic cost so that
+ * zero-cost emission (which would make deception trivially dominant and
+ * remove all evolutionary tradeoffs) cannot evolve.
+ *
+ * At CHEM_EMISSION_COST_RATE = 0.06:
+ *   - Rate 0.0 → 0 energy/s   (silent; save cost)
+ *   - Rate 1.0 → 0.06 energy/s (modest overhead, ~10% of base idle cost)
+ *   - Rate 2.0 → 0.12 energy/s (meaningful burden for sustained max emission)
+ *
+ * This is small enough to allow diverse strategies but large enough to
+ * make constant max-rate emission genuinely costly.
+ */
+const CHEM_EMISSION_COST_RATE = 0.06;
+
 export class Agent {
   readonly id: number;
   nodes: PhysicsNode[];
@@ -47,6 +64,20 @@ export class Agent {
   readonly birthTime: number;
   totalDistanceTravelled: number = 0;
   private _lastCenterXZ: { x: number; z: number } = { x: 0, z: 0 };
+
+  /**
+   * Local chemical concentration sensed at this agent's position.
+   *
+   * Set by World._computeChemicalConcentrations() each tick BEFORE
+   * agent.update() is called.  The value is the sum of nearby agents'
+   * emission rates weighted by inverse distance — a spatial-query
+   * approximation that avoids a persistent diffusion grid.
+   *
+   * Agents receive only this scalar (point-concentration); gradient
+   * direction is NOT provided.  Temporal/spatial gradient detection
+   * must emerge from movement and resampling — Proposal #5 consensus.
+   */
+  localChemConcentration: number = 0;
 
   constructor(
     readonly genome: Genome,
@@ -140,7 +171,7 @@ export class Agent {
   // ── Sensing ──────────────────────────────────────────────────────────────────
 
   /**
-   * Build the 22-element sensor input vector.
+   * Build the 23-element sensor input vector.
    * Slot layout is defined in Genome.ts — this method is the single place where
    * world-state queries are assembled into that layout.
    *
@@ -149,6 +180,7 @@ export class Agent {
    * Slots 14–15: terrain sensing.
    * Slots 16–18: nearest other-agent sensing.
    * Slots 19–21: nearest prop sensing (manipulable objects).
+   * Slot  22:    local chemical concentration (Proposal #5).
    */
   private _sense(
     zones: EnergyZone[],
@@ -200,16 +232,6 @@ export class Agent {
     const wallProxZ = Math.max(0, 1 - distToNearestWallZ / WALL_SENSE_RADIUS);
 
     // ── Proprioception: stretch sensor (slot 12) ──────────────────────────────
-    // Mean absolute deviation of actuated spring lengths from their rest lengths,
-    // expressed as a fraction of rest length, then tanh-scaled.
-    //
-    // Tells the brain how "activated" the body currently is — high values mean
-    // muscles are strongly contracted or extended relative to their natural state.
-    // Without this, all rhythm information comes from the global oscillator only.
-    //
-    // Normalization: tanh(meanFractionalDeviation × 3).
-    //   At 3× scale, a 30% mean deviation → tanh(0.9) ≈ 0.72 — well within range.
-    //   A 10% deviation → tanh(0.3) ≈ 0.29 — still clearly non-zero.
     let totalFractionalDeviation = 0;
     let muscleCount = 0;
     for (const s of this.muscles) {
@@ -223,18 +245,9 @@ export class Agent {
       : 0;
 
     // ── Proprioception: ground contact fraction (slot 13) ────────────────────
-    // Fraction of this agent's nodes that are currently in contact with terrain.
-    //
-    // A node is considered "grounded" when its Y position is within half a
-    // radius of the terrain surface below it (the constraint in PhysicsNode
-    // ensures pos.y >= groundY + radius, so a touching node sits right at that
-    // boundary with only numerical slack above it).
-    //
-    // Normalization: groundContactNodes / totalNodes — already in [0, 1].
     let groundContactCount = 0;
     for (const n of this.nodes) {
       const groundY = heightfield.heightAt(n.pos.x, n.pos.z);
-      // Tolerance of half a radius handles the one-frame Verlet overshoot
       if (n.pos.y <= groundY + n.radius + n.radius * 0.5) {
         groundContactCount++;
       }
@@ -244,9 +257,6 @@ export class Agent {
       : 0;
 
     // ── Terrain sensing ───────────────────────────────────────────────────────
-    // Slope ahead: compare terrain height at (pos + velocity*25) vs current pos.
-    // Positive = heading uphill, negative = heading downhill.
-    // Velocity direction is normalised by speed to give a consistent lookahead.
     const speed = Math.sqrt(velX * velX + velZ * velZ) + 1e-6;
     const lookahead = 25;
     const lookX = c.x + (velX / speed) * lookahead;
@@ -258,8 +268,6 @@ export class Agent {
     );
     const terrainSlopeAhead = Math.tanh((hAhead - hCur) * 0.1);
 
-    // Current terrain elevation: how high the ground is at the agent's position,
-    // normalised by the maximum possible terrain height.
     const terrainElevation = heightfield.maxHeight > 0
       ? Math.min(1, hCur / heightfield.maxHeight)
       : 0;
@@ -283,8 +291,6 @@ export class Agent {
     }
 
     // ── Nearest prop sensing ──────────────────────────────────────────────────
-    // Slots 19–21: direction and distance to the nearest manipulable prop.
-    // Lets the brain navigate toward (or away from) objects it can grab.
     let nearPropDirX = 0, nearPropDirZ = 0, nearPropDist = 1;
     let minPropDist = Infinity;
     for (const prop of allProps) {
@@ -300,8 +306,15 @@ export class Agent {
       }
     }
 
-    // ── Assemble input vector (must match SENSOR_COUNT = 22) ─────────────────
-    // Slot indices are the authoritative layout — see Genome.ts for the table.
+    // ── Chemical concentration (slot 22) ─────────────────────────────────────
+    // Point-concentration only — one scalar, no gradient direction provided.
+    // Agents must evolve temporal/spatial gradient detection via movement.
+    // localChemConcentration is set by World each tick before update() is called.
+    // tanh maps [0, ∞) → [0, 1); scale factor chosen so typical concentrations
+    // (a few nearby emitters) produce values in the mid [0,1] range.
+    const chemSensor = Math.tanh(this.localChemConcentration);
+
+    // ── Assemble input vector (must match SENSOR_COUNT = 23) ─────────────────
     return [
       /* 0  */ Math.min(1, this.energy / 250),               // own energy
       /* 1  */ Math.tanh(nearestDx * dirScale * 5),           // food dir X
@@ -325,6 +338,7 @@ export class Agent {
       /* 19 */ nearPropDirX,                                  // nearest prop dir X
       /* 20 */ nearPropDirZ,                                  // nearest prop dir Z
       /* 21 */ nearPropDist,                                  // nearest prop distance
+      /* 22 */ chemSensor,                                    // local chemical concentration
     ];
   }
 
@@ -375,14 +389,15 @@ export class Agent {
       n.constrainToWorldBounds(0, worldWidth, 0, worldDepth);
     }
 
-    // NOTE: Fall death was removed — at terrain amplitude 60 the maximum
-    // free-fall landing velocity is ~4.5 units/frame, which is too close to the
-    // locomotion range and killed jumping gaits before they could evolve.
-    // landingVel is still captured by PhysicsNode for future diagnostic use.
-
-    // Energy accounting
+    // Energy accounting: base idle cost + spring actuation cost
     this.energy -= energyCost;
     this.energy -= (0.6 + this.nodes.length * 0.15) * dt;
+
+    // Chemical emission metabolic cost (Proposal #5 consensus: real cost required).
+    // Cost is proportional to emission rate regardless of what the agent signals.
+    // This makes sustained high emission genuinely expensive, creating the
+    // evolutionary tradeoff between signaling and energy conservation.
+    this.energy -= this.genome.chemEmissionRate * CHEM_EMISSION_COST_RATE * dt;
 
     // Track XZ distance travelled
     const c = this.centerPos;
@@ -399,10 +414,6 @@ export class Agent {
   }
 
   canReproduce(): boolean {
-    // Threshold lowered 160 → 130 so mobile agents that reach a food patch
-    // can reproduce without needing to sit and hoard.  Reproduction costs 80
-    // energy, leaving the parent with ~50 — below starvation threshold but
-    // survivable if they quickly find more food.
     return this.energy > 130 && this.age > 3;
   }
 
@@ -431,6 +442,7 @@ export class Agent {
       muscles: this.muscles.length,
       springs: this.springs.length,
       distanceTravelled: this.totalDistanceTravelled,
+      chemEmissionRate: this.genome.chemEmissionRate,
     };
   }
 }
