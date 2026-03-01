@@ -131,10 +131,29 @@ export class Environment {
     }
   }
 
-  update(dt: number): void {
-    // Replenish food zones
+  /**
+   * Update environment state for one simulation tick.
+   *
+   * @param dt            Time step in seconds.
+   * @param daylightFactor  Day/night light level in [0, 1].
+   *                        0 = full night (base replenish rate),
+   *                        1 = full midday (replenish rate doubles).
+   *                        Computed from World.timeOfDay.
+   *
+   * Replenish multiplier: `1 + daylightFactor`
+   *   - Night   (daylightFactor = 0): multiplier = 1.0  (base rate)
+   *   - Midday  (daylightFactor = 1): multiplier = 2.0  (double rate)
+   *   - Dawn/dusk (daylightFactor ≈ 0.5): multiplier ≈ 1.5 (50% boost)
+   *
+   * This creates a "dawn rush" — patches refill fastest at noon, drawing
+   * agents to food-rich areas during peak daylight.
+   */
+  update(dt: number, daylightFactor: number = 0.5): void {
+    // Replenish food zones — scale by daylight factor.
+    // At full night the rate is unchanged; at midday it doubles.
+    const replenishMultiplier = 1 + daylightFactor;
     for (const z of this.zones) {
-      z.energy = Math.min(z.maxEnergy, z.energy + z.replenishRate * dt);
+      z.energy = Math.min(z.maxEnergy, z.energy + z.replenishRate * replenishMultiplier * dt);
     }
 
     // Decay corpse depots and remove exhausted ones

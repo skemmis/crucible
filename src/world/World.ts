@@ -150,6 +150,18 @@ const SCORE_HISTORY_LEN = 10;
 const BIRTH_DEATH_GATE_LO = 0.85;
 const BIRTH_DEATH_GATE_HI = 1.15;
 
+// ── Day/night cycle constants ─────────────────────────────────────────────────
+
+/**
+ * Period of the sinusoidal day/night cycle in simulation seconds.
+ *
+ * At 120 s, agents experience multiple full cycles per generation (lifespan
+ * is 60 s), creating consistent selection pressure for temporal behavior.
+ * Calibrate this value alongside generational turnover if the population
+ * average lifespan changes significantly.
+ */
+const DAY_NIGHT_PERIOD_S = 120;
+
 // ── Kinship interaction constants ─────────────────────────────────────────────
 
 /**
@@ -470,6 +482,25 @@ export class World {
    * Cell size: see SpatialHash.ts for tuning notes.
    */
   private _collisionHash: SpatialHash = new SpatialHash(COLLISION_CELL_SIZE);
+
+  /**
+   * Current day/night phase in [0, 1].
+   *
+   * Computed each tick from `this.time` using a sinusoidal curve with period
+   * DAY_NIGHT_PERIOD_S seconds:
+   *
+   *   timeOfDay = (sin(2π × time / period) + 1) / 2
+   *
+   * Value interpretation:
+   *   0.0 — full night (trough of sine)
+   *   0.5 — dawn or dusk (zero-crossing)
+   *   1.0 — full midday (peak of sine)
+   *
+   * Used by Environment.update() to scale food replenish rates.
+   * Exposed as a public readonly field for future use by the renderer
+   * (e.g. sky colour) and Step 2 (lightSensitivity genome hook).
+   */
+  timeOfDay: number = 0.5; // initialise to neutral (dawn) so first tick is smooth
 
   constructor(cfg: WorldConfig) {
     this.config = cfg;
@@ -943,7 +974,15 @@ export class World {
     this.time += dt;
     this.stepCount++;
     this.telemetry.advanceFrame();
-    this.env.update(dt);
+
+    // ── Day/night cycle ────────────────────────────────────────────────────────
+    // timeOfDay ∈ [0, 1]: 0 = full night, 1 = full midday.
+    // The sine function is shifted and scaled so it oscillates smoothly between
+    // these extremes with period DAY_NIGHT_PERIOD_S seconds.
+    this.timeOfDay = (Math.sin((2 * Math.PI * this.time) / DAY_NIGHT_PERIOD_S) + 1) / 2;
+
+    // Pass timeOfDay to the environment so food replenish rates scale with light.
+    this.env.update(dt, this.timeOfDay);
 
     // Reset per-frame energy tracking
     this._frameEnergyGained.clear();

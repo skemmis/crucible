@@ -1,21 +1,19 @@
 ## Summary
 
-- **Lever D (Proposal #43):** Adds two proprioceptive sensor inputs to every agent, increasing `SENSOR_COUNT` from 12 → 14. These are body-state inputs that enable gait coordination beyond the global oscillator.
-- **Stretch sensor (slot 12):** Mean absolute fractional deviation of actuated spring lengths from their rest lengths, tanh-scaled. Tells the brain how "activated" the body currently is — enables phase-shifted muscle sequences.
-- **Ground contact fraction (slot 13):** Fraction of nodes currently touching terrain, normalized to [0, 1]. Tells the brain how many feet are planted — enables stance-aware locomotion strategies.
-- **Lever A** (sigma 12→5) was already present in the codebase; this PR adds the comment referencing the proposal for completeness and ships Lever D alongside it.
+- Implements **Step 1 only** of Proposal #9: sinusoidal day/night cycle with food replenish rate scaling
+- `World.ts` gains a public `timeOfDay` field (0=night, 1=midday) updated each tick from a 120-second sine wave
+- `Environment.update()` accepts a `daylightFactor` parameter and applies a `1 + daylightFactor` multiplier to all food zone replenish rates (1× at night, 2× at full midday)
+- No agent changes, no genome changes — Step 2 (lightSensitivity gene + vision penalty) is explicitly deferred per consensus
 
 ## Changes
 
-- **`src/agent/Genome.ts`**: Updated `SENSOR_COUNT` from 12 to 14. Expanded the sensor slot table comment to document the two new proprioceptive inputs with their ranges and normalization rationale.
-- **`src/agent/Agent.ts`**: Updated `_sense()` to accept a `Heightfield` parameter (already available in `update()`). Added stretch sensor computation (iterates actuated muscles, computes mean fractional length deviation, applies tanh×3 normalization) and ground contact computation (queries terrain height per node, counts grounded nodes, divides by total nodes). Both values appended as slots 12–13.
+- **`src/world/Environment.ts`**: Added `daylightFactor` parameter to `update(dt, daylightFactor)`. Replenish multiplier `= 1 + daylightFactor` scales smoothly from base rate (night) to double rate (midday). Default of `0.5` keeps existing callers unaffected.
+- **`src/world/World.ts`**: Added `DAY_NIGHT_PERIOD_S = 120` constant and `timeOfDay` public field. Each tick: `timeOfDay = (sin(2π × time / 120) + 1) / 2`. Passes `timeOfDay` into `env.update()`. Field is exposed for future renderer use (sky colour) and Step 2 (genome hook).
 
 ## Test plan
-
 - [ ] Run `npm run dev` and verify the simulation starts without errors
-- [ ] Open browser console — confirm no TypeScript/runtime errors about input size mismatch
-- [ ] Observe agents locomoting — the new inputs are purely additive; movement quality should be equal or better than before
-- [ ] After several generations, check whether locomotion patterns show more variety (gait differentiation is the intended emergent effect, not guaranteed immediately)
-- [ ] Confirm `SENSOR_COUNT === 14` matches the length of the array returned by `_sense()` — the existing sanity-check `const _check: number = SENSOR_COUNT` will catch static mismatches
+- [ ] Open browser console — no runtime errors expected
+- [ ] Wait ~60 seconds and observe food zones visually brightening (more opaque discs) as `timeOfDay` peaks toward midday; zones refill slower during the night half of the cycle
+- [ ] Confirm existing behaviour is unchanged: agents move, reproduce, harvest, and die as before
 
-Closes #43
+Closes #9
